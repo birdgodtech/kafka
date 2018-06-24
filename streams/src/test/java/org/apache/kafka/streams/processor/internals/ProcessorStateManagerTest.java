@@ -456,7 +456,6 @@ public class ProcessorStateManagerTest {
         assertThat(read, equalTo(Collections.<TopicPartition, Long>emptyMap()));
     }
 
-
     @Test
     public void shouldThrowIllegalArgumentExceptionIfStoreNameIsSameAsCheckpointFileName() throws IOException {
         final ProcessorStateManager stateManager = new ProcessorStateManager(
@@ -653,28 +652,36 @@ public class ProcessorStateManagerTest {
         }
     }
 
-    @SuppressWarnings("unchecked")
     @Test
-    public void shouldSuccessfullyReInitializeStateStores() throws IOException {
+    public void shouldSuccessfullyReInitializeStateStoresWithEosDisable() throws Exception {
+        shouldSuccessfullyReInitializeStateStores(false);
+    }
+
+    @Test
+    public void shouldSuccessfullyReInitializeStateStoresWithEosEnable() throws Exception {
+        shouldSuccessfullyReInitializeStateStores(true);
+    }
+
+    private void shouldSuccessfullyReInitializeStateStores(final boolean eosEnabled) throws Exception {
         final String store2Name = "store2";
         final String store2Changelog = "store2-changelog";
         final TopicPartition store2Partition = new TopicPartition(store2Changelog, 0);
         final List<TopicPartition> changelogPartitions = Arrays.asList(changelogTopicPartition, store2Partition);
-        Map<String, String> storeToChangelog = new HashMap() {
+        final Map<String, String> storeToChangelog = new HashMap<String, String>() {
             {
                 put(storeName, changelogTopic);
                 put(store2Name, store2Changelog);
             }
         };
         final ProcessorStateManager stateManager = new ProcessorStateManager(
-                taskId,
-                changelogPartitions,
-                false,
-                stateDirectory,
-                storeToChangelog,
-                changelogReader,
-                false,
-                logContext);
+            taskId,
+            changelogPartitions,
+            false,
+            stateDirectory,
+            storeToChangelog,
+            changelogReader,
+            eosEnabled,
+            logContext);
 
         final MockStateStore stateStore = new MockStateStore(storeName, true);
         final MockStateStore stateStore2 = new MockStateStore(store2Name, true);
@@ -696,7 +703,7 @@ public class ProcessorStateManagerTest {
         assertTrue(stateStore2.initialized);
     }
 
-    private ProcessorStateManager getStandByStateManager(TaskId taskId) throws IOException {
+    private ProcessorStateManager getStandByStateManager(final TaskId taskId) throws IOException {
         return new ProcessorStateManager(
             taskId,
             noPartitions,

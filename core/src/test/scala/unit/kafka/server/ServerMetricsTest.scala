@@ -19,31 +19,29 @@ package kafka.server
 
 import kafka.utils.TestUtils
 import org.apache.kafka.common.metrics.Sensor
-import org.junit.Assert._
-import org.junit.Test
-import org.scalatest.junit.JUnitSuite
+import org.apache.kafka.server.metrics.MetricConfigs
+import org.junit.jupiter.api.Assertions._
+import org.junit.jupiter.api.Test
 
-class ServerMetricsTest extends JUnitSuite {
+class ServerMetricsTest {
 
   @Test
   def testMetricsConfig(): Unit = {
     val recordingLevels = List(Sensor.RecordingLevel.DEBUG, Sensor.RecordingLevel.INFO)
     val illegalNames = List("IllegalName", "")
-    val props = TestUtils.createBrokerConfig(0, "localhost:2818")
+    val props = TestUtils.createBrokerConfig(0)
 
     for (recordingLevel <- recordingLevels) {
-      props.put(KafkaConfig.MetricRecordingLevelProp, recordingLevel.name)
+      props.put(MetricConfigs.METRIC_RECORDING_LEVEL_CONFIG, recordingLevel.name)
       val config = KafkaConfig.fromProps(props)
-      val metricConfig = KafkaServer.metricConfig(config)
+      val metricConfig = Server.buildMetricsConfig(config)
       assertEquals(recordingLevel, metricConfig.recordLevel)
     }
 
     for (illegalName <- illegalNames) {
-      intercept[IllegalArgumentException] {
-        props.put(KafkaConfig.MetricRecordingLevelProp, illegalName)
-        val config = KafkaConfig.fromProps(props)
-        KafkaServer.metricConfig(config)
-      }
+      props.put(MetricConfigs.METRIC_RECORDING_LEVEL_CONFIG, illegalName)
+      val config = KafkaConfig.fromProps(props)
+      assertThrows(classOf[IllegalArgumentException], () => Server.buildMetricsConfig(config))
     }
 
   }

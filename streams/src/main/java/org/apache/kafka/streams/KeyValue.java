@@ -14,7 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.streams;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Objects;
 
@@ -25,6 +28,7 @@ import java.util.Objects;
  * @param <K> Key type
  * @param <V> Value type
  */
+@InterfaceAudience.Public
 public class KeyValue<K, V> {
 
     /** The key of the key-value pair. */
@@ -63,16 +67,16 @@ public class KeyValue<K, V> {
 
     @Override
     public boolean equals(final Object obj) {
-        if (this == obj)
+        if (this == obj) {
             return true;
+        }
 
         if (!(obj instanceof KeyValue)) {
             return false;
         }
 
-        final KeyValue other = (KeyValue) obj;
-        return (key == null ? other.key == null : key.equals(other.key))
-                && (value == null ? other.value == null : value.equals(other.value));
+        final KeyValue<?, ?> other = (KeyValue<?, ?>) obj;
+        return Objects.equals(key, other.key) && Objects.equals(value, other.value);
     }
 
     @Override

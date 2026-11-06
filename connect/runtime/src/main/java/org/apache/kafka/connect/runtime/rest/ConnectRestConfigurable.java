@@ -24,8 +24,8 @@ import org.slf4j.LoggerFactory;
 import java.util.Map;
 import java.util.Objects;
 
-import javax.ws.rs.core.Configurable;
-import javax.ws.rs.core.Configuration;
+import jakarta.ws.rs.core.Configurable;
+import jakarta.ws.rs.core.Configuration;
 
 /**
  * The implementation delegates to {@link ResourceConfig} so that we can handle duplicate
@@ -38,7 +38,7 @@ public class ConnectRestConfigurable implements Configurable<ResourceConfig> {
     private static final boolean ALLOWED_TO_REGISTER = true;
     private static final boolean NOT_ALLOWED_TO_REGISTER = false;
 
-    private ResourceConfig resourceConfig;
+    private final ResourceConfig resourceConfig;
 
     public ConnectRestConfigurable(ResourceConfig resourceConfig) {
         Objects.requireNonNull(resourceConfig, "ResourceConfig can't be null");
@@ -73,7 +73,7 @@ public class ConnectRestConfigurable implements Configurable<ResourceConfig> {
     }
 
     @Override
-    public ResourceConfig register(Object component, Map contracts) {
+    public ResourceConfig register(Object component, Map<Class<?>, Integer> contracts) {
         if (allowedToRegister(component)) {
             resourceConfig.register(component, contracts);
         }
@@ -81,7 +81,7 @@ public class ConnectRestConfigurable implements Configurable<ResourceConfig> {
     }
 
     @Override
-    public ResourceConfig register(Object component, Class[] contracts) {
+    public ResourceConfig register(Object component, Class<?>... contracts) {
         if (allowedToRegister(component)) {
             resourceConfig.register(component, contracts);
         }
@@ -89,7 +89,7 @@ public class ConnectRestConfigurable implements Configurable<ResourceConfig> {
     }
 
     @Override
-    public ResourceConfig register(Class componentClass, Map contracts) {
+    public ResourceConfig register(Class<?> componentClass, Map<Class<?>, Integer> contracts) {
         if (allowedToRegister(componentClass)) {
             resourceConfig.register(componentClass, contracts);
         }
@@ -97,7 +97,7 @@ public class ConnectRestConfigurable implements Configurable<ResourceConfig> {
     }
 
     @Override
-    public ResourceConfig register(Class componentClass, Class[] contracts) {
+    public ResourceConfig register(Class<?> componentClass, Class<?>... contracts) {
         if (allowedToRegister(componentClass)) {
             resourceConfig.register(componentClass, contracts);
         }
@@ -105,7 +105,7 @@ public class ConnectRestConfigurable implements Configurable<ResourceConfig> {
     }
 
     @Override
-    public ResourceConfig register(Class componentClass, int priority) {
+    public ResourceConfig register(Class<?> componentClass, int priority) {
         if (allowedToRegister(componentClass)) {
             resourceConfig.register(componentClass, priority);
         }
@@ -113,7 +113,7 @@ public class ConnectRestConfigurable implements Configurable<ResourceConfig> {
     }
 
     @Override
-    public ResourceConfig register(Class componentClass) {
+    public ResourceConfig register(Class<?> componentClass) {
         if (allowedToRegister(componentClass)) {
             resourceConfig.register(componentClass);
         }
@@ -128,7 +128,7 @@ public class ConnectRestConfigurable implements Configurable<ResourceConfig> {
         return ALLOWED_TO_REGISTER;
     }
 
-    private boolean allowedToRegister(Class componentClass) {
+    private boolean allowedToRegister(Class<?> componentClass) {
         if (resourceConfig.isRegistered(componentClass)) {
             log.warn("The resource {} is already registered", componentClass);
             return NOT_ALLOWED_TO_REGISTER;

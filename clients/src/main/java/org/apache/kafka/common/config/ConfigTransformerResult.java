@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.common.config;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.config.provider.ConfigProvider;
 
 import java.util.Map;
@@ -23,10 +24,11 @@ import java.util.Map;
 /**
  * The result of a transformation from {@link ConfigTransformer}.
  */
+@InterfaceAudience.Public
 public class ConfigTransformerResult {
 
-    private Map<String, Long> ttls;
-    private Map<String, String> data;
+    private final Map<String, Long> ttls;
+    private final Map<String, String> data;
 
     /**
      * Creates a new ConfigTransformerResult with the given data and TTL values for a set of paths.

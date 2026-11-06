@@ -46,50 +46,23 @@ public class Field {
         this(name, type, null, false, null);
     }
 
-    public static class Int8 extends Field {
-        public Int8(String name, String docString) {
-            super(name, Type.INT8, docString, false, null);
-        }
-        public Int8(String name, String docString, byte defaultValue) {
-            super(name, Type.INT8, docString, true, defaultValue);
-        }
-    }
+    public static class TaggedFieldsSection extends Field {
+        private static final String NAME = "_tagged_fields";
+        private static final String DOC_STRING = "The tagged fields";
 
-    public static class Int32 extends Field {
-        public Int32(String name, String docString) {
-            super(name, Type.INT32, docString, false, null);
-        }
-
-        public Int32(String name, String docString, int defaultValue) {
-            super(name, Type.INT32, docString, true, defaultValue);
-        }
-    }
-
-    public static class Int64 extends Field {
-        public Int64(String name, String docString) {
-            super(name, Type.INT64, docString, false, null);
+        /**
+         * Create a new TaggedFieldsSection with the given tags and fields.
+         *
+         * @param fields    This is an array containing Integer tags followed
+         *                  by associated Field objects.
+         * @return          The new {@link TaggedFieldsSection}
+         */
+        public static TaggedFieldsSection of(Object... fields) {
+            return new TaggedFieldsSection(TaggedFields.of(fields));
         }
 
-        public Int64(String name, String docString, long defaultValue) {
-            super(name, Type.INT64, docString, true, defaultValue);
-        }
-    }
-
-    public static class Int16 extends Field {
-        public Int16(String name, String docString) {
-            super(name, Type.INT16, docString, false, null);
-        }
-    }
-
-    public static class Str extends Field {
-        public Str(String name, String docString) {
-            super(name, Type.STRING, docString, false, null);
-        }
-    }
-
-    public static class NullableStr extends Field {
-        public NullableStr(String name, String docString) {
-            super(name, Type.NULLABLE_STRING, docString, false, null);
+        public TaggedFieldsSection(Type type) {
+            super(NAME, type, DOC_STRING, false, null);
         }
     }
 }

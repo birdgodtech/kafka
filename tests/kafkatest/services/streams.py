@@ -15,15 +15,18 @@
 
 import os.path
 import signal
-import streams_property
+import uuid
+from . import streams_property
+from . import consumer_property
 from ducktape.services.service import Service
 from ducktape.utils.util import wait_until
 from kafkatest.directory_layout.kafka_path import KafkaPathResolverMixin
 from kafkatest.services.kafka import KafkaConfig
 from kafkatest.services.monitor.jmx import JmxMixin
-from kafkatest.version import LATEST_0_10_0, LATEST_0_10_1, LATEST_0_10_2, LATEST_0_11_0, LATEST_1_0, LATEST_1_1
+from .kafka.util import get_log4j_config_param, get_log4j_config_for_tools
 
 STATE_DIR = "state.dir"
+INMEMORY_TOPOLOGY_DESCRIPTION_PLUGIN_CLASS = "org.apache.kafka.server.streams.InMemoryTopologyDescriptionPlugin"
 
 class StreamsTestBaseService(KafkaPathResolverMixin, JmxMixin, Service):
     """Base class for Streams Test services providing some common settings and functionality"""
@@ -37,12 +40,23 @@ class StreamsTestBaseService(KafkaPathResolverMixin, JmxMixin, Service):
     STDERR_FILE = os.path.join(PERSISTENT_ROOT, "streams.stderr")
     JMX_LOG_FILE = os.path.join(PERSISTENT_ROOT, "jmx_tool.log")
     JMX_ERR_FILE = os.path.join(PERSISTENT_ROOT, "jmx_tool.err.log")
-    LOG4J_CONFIG_FILE = os.path.join(PERSISTENT_ROOT, "tools-log4j.properties")
     PID_FILE = os.path.join(PERSISTENT_ROOT, "streams.pid")
 
     CLEAN_NODE_ENABLED = True
 
     logs = {
+        "streams_config": {
+            "path": CONFIG_FILE,
+            "collect_default": True},
+        "streams_config.1": {
+            "path": CONFIG_FILE + ".1",
+            "collect_default": True},
+        "streams_config.0-1": {
+            "path": CONFIG_FILE + ".0-1",
+            "collect_default": True},
+        "streams_config.1-1": {
+            "path": CONFIG_FILE + ".1-1",
+            "collect_default": True},
         "streams_log": {
             "path": LOG_FILE,
             "collect_default": True},
@@ -204,15 +218,23 @@ class StreamsTestBaseService(KafkaPathResolverMixin, JmxMixin, Service):
                      'user_test_args3': user_test_args3,
                      'user_test_args4': user_test_args4}
         self.log_level = "DEBUG"
+        # Create a randomized state directory path to prevent test interference
+        self.state_dir = os.path.join(self.PERSISTENT_ROOT, str(uuid.uuid4()))
 
     @property
     def node(self):
         return self.nodes[0]
 
+    @property
+    def expectedMessage(self):
+        return 'StreamsTest instance started'
+
     def pids(self, node):
         try:
-            return [pid for pid in node.account.ssh_capture("cat " + self.PID_FILE, callback=int)]
-        except:
+            pids = [pid for pid in node.account.ssh_capture("cat " + self.PID_FILE, callback=str)]
+            return [int(pid) for pid in pids]
+        except Exception as exception:
+            self.logger.debug(str(exception))
             return []
 
     def stop_nodes(self, clean_shutdown=True):
@@ -267,10 +289,11 @@ class StreamsTestBaseService(KafkaPathResolverMixin, JmxMixin, Service):
         args['stdout'] = self.STDOUT_FILE
         args['stderr'] = self.STDERR_FILE
         args['pidfile'] = self.PID_FILE
-        args['log4j'] = self.LOG4J_CONFIG_FILE
+        args['log4j_param'] = get_log4j_config_param(node)
+        args['log4j'] = get_log4j_config_for_tools(node)
         args['kafka_run_class'] = self.path.script("kafka-run-class.sh", node)
 
-        cmd = "( export KAFKA_LOG4J_OPTS=\"-Dlog4j.configuration=file:%(log4j)s\"; " \
+        cmd = "( export KAFKA_LOG4J_OPTS=\"%(log4j_param)s%(log4j)s\"; " \
               "INCLUDE_TEST_JARS=true %(kafka_run_class)s %(streams_class_name)s " \
               " %(config_file)s %(user_test_args1)s %(user_test_args2)s %(user_test_args3)s" \
               " %(user_test_args4)s & echo $! >&3 ) 1>> %(stdout)s 2>> %(stderr)s 3> %(pidfile)s" % args
@@ -280,49 +303,96 @@ class StreamsTestBaseService(KafkaPathResolverMixin, JmxMixin, Service):
         return cmd
 
     def prop_file(self):
-        cfg = KafkaConfig(**{streams_property.STATE_DIR: self.PERSISTENT_ROOT, streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers()})
+        cfg = KafkaConfig(**{streams_property.STATE_DIR: self.state_dir, streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers()})
         return cfg.render()
 
     def start_node(self, node):
         node.account.mkdirs(self.PERSISTENT_ROOT)
         prop_file = self.prop_file()
         node.account.create_file(self.CONFIG_FILE, prop_file)
-        node.account.create_file(self.LOG4J_CONFIG_FILE, self.render('tools_log4j.properties', log_file=self.LOG_FILE))
+        node.account.create_file(get_log4j_config_for_tools(node), self.render(get_log4j_config_for_tools(node), log_file=self.LOG_FILE))
 
         self.logger.info("Starting StreamsTest process on " + str(node.account))
         with node.account.monitor_log(self.STDOUT_FILE) as monitor:
             node.account.ssh(self.start_cmd(node))
-            monitor.wait_until('StreamsTest instance started', timeout_sec=60, err_msg="Never saw message indicating StreamsTest finished startup on " + str(node.account))
+            monitor.wait_until(self.expectedMessage, timeout_sec=60, err_msg="Never saw message indicating StreamsTest finished startup on " + str(node.account))
 
-        if len(self.pids(node)) == 0:
+        if not self.pids(node):
             raise RuntimeError("No process ids recorded")
 
 
 class StreamsSmokeTestBaseService(StreamsTestBaseService):
     """Base class for Streams Smoke Test services providing some common settings and functionality"""
 
-    def __init__(self, test_context, kafka, command):
+    def __init__(self, test_context, kafka, command, processing_guarantee = 'at_least_once', group_protocol = 'classic', num_threads = 3, replication_factor = 3, transactional = False, extra_configs = None):
         super(StreamsSmokeTestBaseService, self).__init__(test_context,
                                                           kafka,
                                                           "org.apache.kafka.streams.tests.StreamsSmokeTest",
                                                           command)
+        self.NUM_THREADS = num_threads
+        self.PROCESSING_GUARANTEE = processing_guarantee
+        self.GROUP_PROTOCOL = group_protocol
+        self.KAFKA_STREAMS_VERSION = ""
+        self.UPGRADE_FROM = None
+        self.REPLICATION_FACTOR = replication_factor
+        self.TRANSACTIONAL = transactional
+        self.EXTRA_CONFIGS = extra_configs or {}
 
+    def set_version(self, kafka_streams_version):
+        self.KAFKA_STREAMS_VERSION = kafka_streams_version
 
-class StreamsEosTestBaseService(StreamsTestBaseService):
-    """Base class for Streams EOS Test services providing some common settings and functionality"""
+    def set_upgrade_from(self, upgrade_from):
+        self.UPGRADE_FROM = upgrade_from
 
-    clean_node_enabled = True
+    def prop_file(self):
+        properties = {streams_property.STATE_DIR: self.state_dir,
+                      streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers(),
+                      streams_property.PROCESSING_GUARANTEE: self.PROCESSING_GUARANTEE,
+                      streams_property.GROUP_PROTOCOL: self.GROUP_PROTOCOL,
+                      streams_property.NUM_THREADS: self.NUM_THREADS,
+                      "replication.factor": self.REPLICATION_FACTOR,
+                      "num.standby.replicas": 2,
+                      "buffered.records.per.partition": 100,
+                      "commit.interval.ms": 1000,
+                      "auto.offset.reset": "earliest",
+                      "acks": "all",
+                      "acceptable.recovery.lag": "9223372036854775807", # enable a one-shot assignment
+                      "session.timeout.ms": "10000" # set back to 10s for tests. See KIP-735
+                      }
 
-    def __init__(self, test_context, kafka, command):
-        super(StreamsEosTestBaseService, self).__init__(test_context,
-                                                        kafka,
-                                                        "org.apache.kafka.streams.tests.StreamsEosTest",
-                                                        command)
+        if self.UPGRADE_FROM is not None:
+            properties['upgrade.from'] = self.UPGRADE_FROM
 
-    def clean_node(self, node):
-        if self.clean_node_enabled:
-            super(StreamsEosTestBaseService, self).clean_node(node)
+        if self.TRANSACTIONAL:
+            properties['enable.transactional.statestores'] = "true"
 
+        # Applied last so a test can override any of the defaults above.
+        properties.update(self.EXTRA_CONFIGS)
+
+        cfg = KafkaConfig(**properties)
+        return cfg.render()
+
+    def start_cmd(self, node):
+        args = self.args.copy()
+        args['config_file'] = self.CONFIG_FILE
+        args['stdout'] = self.STDOUT_FILE
+        args['stderr'] = self.STDERR_FILE
+        args['pidfile'] = self.PID_FILE
+        args['log4j_param'] = get_log4j_config_param(node)
+        args['log4j'] = get_log4j_config_for_tools(node)
+        args['version'] = self.KAFKA_STREAMS_VERSION
+        args['kafka_run_class'] = self.path.script("kafka-run-class.sh", node)
+
+        cmd = "( export KAFKA_LOG4J_OPTS=\"%(log4j_param)s%(log4j)s\";" \
+              " INCLUDE_TEST_JARS=true UPGRADE_KAFKA_STREAMS_TEST_VERSION=%(version)s" \
+              " %(kafka_run_class)s %(streams_class_name)s" \
+              " %(config_file)s %(user_test_args1)s" \
+              " & echo $! >&3 ) " \
+              "1>> %(stdout)s 2>> %(stderr)s 3> %(pidfile)s" % args
+
+        self.logger.info("Executing streams cmd: " + cmd)
+
+        return cmd
 
 class StreamsSmokeTestDriverService(StreamsSmokeTestBaseService):
     def __init__(self, test_context, kafka):
@@ -338,44 +408,23 @@ class StreamsSmokeTestDriverService(StreamsSmokeTestBaseService):
         args['stdout'] = self.STDOUT_FILE
         args['stderr'] = self.STDERR_FILE
         args['pidfile'] = self.PID_FILE
-        args['log4j'] = self.LOG4J_CONFIG_FILE
+        args['log4j_param'] = get_log4j_config_param(node)
+        args['log4j'] = get_log4j_config_for_tools(node)
         args['disable_auto_terminate'] = self.DISABLE_AUTO_TERMINATE
         args['kafka_run_class'] = self.path.script("kafka-run-class.sh", node)
 
-        cmd = "( export KAFKA_LOG4J_OPTS=\"-Dlog4j.configuration=file:%(log4j)s\"; " \
+        cmd = "( export KAFKA_LOG4J_OPTS=\"%(log4j_param)s%(log4j)s\"; " \
               "INCLUDE_TEST_JARS=true %(kafka_run_class)s %(streams_class_name)s " \
               " %(config_file)s %(user_test_args1)s %(disable_auto_terminate)s" \
               " & echo $! >&3 ) 1>> %(stdout)s 2>> %(stderr)s 3> %(pidfile)s" % args
 
+        self.logger.info("Executing streams cmd: " + cmd)
+
         return cmd
 
 class StreamsSmokeTestJobRunnerService(StreamsSmokeTestBaseService):
-    def __init__(self, test_context, kafka):
-        super(StreamsSmokeTestJobRunnerService, self).__init__(test_context, kafka, "process")
-
-
-class StreamsEosTestDriverService(StreamsEosTestBaseService):
-    def __init__(self, test_context, kafka):
-        super(StreamsEosTestDriverService, self).__init__(test_context, kafka, "run")
-
-
-class StreamsEosTestJobRunnerService(StreamsEosTestBaseService):
-    def __init__(self, test_context, kafka):
-        super(StreamsEosTestJobRunnerService, self).__init__(test_context, kafka, "process")
-
-class StreamsComplexEosTestJobRunnerService(StreamsEosTestBaseService):
-    def __init__(self, test_context, kafka):
-        super(StreamsComplexEosTestJobRunnerService, self).__init__(test_context, kafka, "process-complex")
-
-class StreamsEosTestVerifyRunnerService(StreamsEosTestBaseService):
-    def __init__(self, test_context, kafka):
-        super(StreamsEosTestVerifyRunnerService, self).__init__(test_context, kafka, "verify")
-
-
-class StreamsComplexEosTestVerifyRunnerService(StreamsEosTestBaseService):
-    def __init__(self, test_context, kafka):
-        super(StreamsComplexEosTestVerifyRunnerService, self).__init__(test_context, kafka, "verify-complex")
-
+    def __init__(self, test_context, kafka, processing_guarantee, group_protocol = 'classic', num_threads = 3, replication_factor = 3, transactional = False, extra_configs = None):
+        super(StreamsSmokeTestJobRunnerService, self).__init__(test_context, kafka, "process", processing_guarantee, group_protocol, num_threads, replication_factor, transactional, extra_configs)
 
 class StreamsSmokeTestShutdownDeadlockService(StreamsSmokeTestBaseService):
     def __init__(self, test_context, kafka):
@@ -383,19 +432,53 @@ class StreamsSmokeTestShutdownDeadlockService(StreamsSmokeTestBaseService):
 
 
 class StreamsBrokerCompatibilityService(StreamsTestBaseService):
-    def __init__(self, test_context, kafka, eosEnabled):
+    def __init__(self, test_context, kafka, processingMode):
         super(StreamsBrokerCompatibilityService, self).__init__(test_context,
                                                                 kafka,
                                                                 "org.apache.kafka.streams.tests.BrokerCompatibilityTest",
-                                                                eosEnabled)
+                                                                processingMode)
+
+    def prop_file(self):
+        properties = {streams_property.STATE_DIR: self.state_dir,
+                      streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers(),
+                      # the old broker (< 2.4) does not support configuration replication.factor=-1
+                      "replication.factor": 1,
+                      "acceptable.recovery.lag": "9223372036854775807", # enable a one-shot assignment
+                      "session.timeout.ms": "10000" # set back to 10s for tests. See KIP-735
+                      }
+
+        cfg = KafkaConfig(**properties)
+        return cfg.render()
 
 
 class StreamsBrokerDownResilienceService(StreamsTestBaseService):
-    def __init__(self, test_context, kafka, configs):
+    def __init__(self, test_context, kafka, group_protocol="classic", extra_configs=None):
         super(StreamsBrokerDownResilienceService, self).__init__(test_context,
                                                                  kafka,
                                                                  "org.apache.kafka.streams.tests.StreamsBrokerDownResilienceTest",
-                                                                 configs)
+                                                                 "")
+        self.GROUP_PROTOCOL = group_protocol
+        self.EXTRA_CONFIGS = extra_configs or {}
+
+    def prop_file(self):
+        properties = {streams_property.STATE_DIR: self.state_dir,
+                      streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers(),
+                      streams_property.GROUP_PROTOCOL: self.GROUP_PROTOCOL,
+                      # Required configs for broker down resilience
+                      # Consumer max.poll.interval > min(max.block.ms, ((retries + 1) * request.timeout)
+                      "consumer.max.poll.interval.ms": 50000,
+                      "producer.retries": 2,
+                      "producer.request.timeout.ms": 15000,
+                      "producer.max.block.ms": 30000,
+                      "acceptable.recovery.lag": "9223372036854775807", # enable a one-shot assignment
+                      "session.timeout.ms": "10000" # set back to 10s for tests. See KIP-735
+                      }
+
+        # Merge any extra configs
+        properties.update(self.EXTRA_CONFIGS)
+
+        cfg = KafkaConfig(**properties)
+        return cfg.render()
 
     def start_cmd(self, node):
         args = self.args.copy()
@@ -403,13 +486,13 @@ class StreamsBrokerDownResilienceService(StreamsTestBaseService):
         args['stdout'] = self.STDOUT_FILE
         args['stderr'] = self.STDERR_FILE
         args['pidfile'] = self.PID_FILE
-        args['log4j'] = self.LOG4J_CONFIG_FILE
+        args['log4j_param'] = get_log4j_config_param(node)
+        args['log4j'] = get_log4j_config_for_tools(node)
         args['kafka_run_class'] = self.path.script("kafka-run-class.sh", node)
 
-        cmd = "( export KAFKA_LOG4J_OPTS=\"-Dlog4j.configuration=file:%(log4j)s\"; " \
+        cmd = "( export KAFKA_LOG4J_OPTS=\"%(log4j_param)s%(log4j)s\"; " \
               "INCLUDE_TEST_JARS=true %(kafka_run_class)s %(streams_class_name)s " \
-              " %(config_file)s %(user_test_args1)s %(user_test_args2)s %(user_test_args3)s" \
-              " %(user_test_args4)s & echo $! >&3 ) 1>> %(stdout)s 2>> %(stderr)s 3> %(pidfile)s" % args
+              " %(config_file)s & echo $! >&3 ) 1>> %(stdout)s 2>> %(stderr)s 3> %(pidfile)s" % args
 
         self.logger.info("Executing: " + cmd)
 
@@ -423,6 +506,75 @@ class StreamsStandbyTaskService(StreamsTestBaseService):
                                                         "org.apache.kafka.streams.tests.StreamsStandByReplicaTest",
                                                         configs)
 
+class StreamsResetter(StreamsTestBaseService):
+    def __init__(self, test_context, kafka, topic, applicationId):
+        super(StreamsResetter, self).__init__(test_context,
+                                              kafka,
+                                              "org.apache.kafka.tools.StreamsResetter",
+                                              "")
+        self.topic = topic
+        self.applicationId = applicationId
+
+    @property
+    def expectedMessage(self):
+        return 'Done.'
+
+    def start_cmd(self, node):
+        args = self.args.copy()
+        args['bootstrap.servers'] = self.kafka.bootstrap_servers()
+        args['stdout'] = self.STDOUT_FILE
+        args['stderr'] = self.STDERR_FILE
+        args['pidfile'] = self.PID_FILE
+        args['log4j_param'] = get_log4j_config_param(node)
+        args['log4j'] = get_log4j_config_for_tools(node)
+        args['application.id'] = self.applicationId
+        args['input.topics'] = self.topic
+        args['kafka_run_class'] = self.path.script("kafka-run-class.sh", node)
+
+        cmd = "(export KAFKA_LOG4J_OPTS=\"%(log4j_param)s%(log4j)s\";" \
+              "%(kafka_run_class)s %(streams_class_name)s " \
+              "--bootstrap-server %(bootstrap.servers)s " \
+              "--force " \
+              "--application-id %(application.id)s " \
+              "--input-topics %(input.topics)s " \
+              "& echo $! >&3 ) " \
+              "1>> %(stdout)s " \
+              "2>> %(stderr)s " \
+              "3> %(pidfile)s "% args
+
+        self.logger.info("Executing: " + cmd)
+
+        return cmd
+
+
+class StreamsOptimizedUpgradeTestService(StreamsTestBaseService):
+    def __init__(self, test_context, kafka):
+        super(StreamsOptimizedUpgradeTestService, self).__init__(test_context,
+                                                                 kafka,
+                                                                 "org.apache.kafka.streams.tests.StreamsOptimizedTest",
+                                                                 "")
+        self.OPTIMIZED_CONFIG = 'none'
+        self.INPUT_TOPIC = None
+        self.AGGREGATION_TOPIC = None
+        self.REDUCE_TOPIC = None
+        self.JOIN_TOPIC = None
+
+    def prop_file(self):
+        properties = {streams_property.STATE_DIR: self.state_dir,
+                      streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers(),
+                      'topology.optimization': self.OPTIMIZED_CONFIG,
+                      'input.topic': self.INPUT_TOPIC,
+                      'aggregation.topic': self.AGGREGATION_TOPIC,
+                      'reduce.topic': self.REDUCE_TOPIC,
+                      'join.topic': self.JOIN_TOPIC,
+                      "acceptable.recovery.lag": "9223372036854775807", # enable a one-shot assignment
+                      "session.timeout.ms": "10000" # set back to 10s for tests. See KIP-735
+                      }
+
+
+        cfg = KafkaConfig(**properties)
+        return cfg.render()
+
 
 class StreamsUpgradeTestJobRunnerService(StreamsTestBaseService):
     def __init__(self, test_context, kafka):
@@ -432,6 +584,10 @@ class StreamsUpgradeTestJobRunnerService(StreamsTestBaseService):
                                                                  "")
         self.UPGRADE_FROM = None
         self.UPGRADE_TO = None
+        self.extra_properties = {}
+
+    def set_config(self, key, value):
+        self.extra_properties[key] = value
 
     def set_version(self, kafka_streams_version):
         self.KAFKA_STREAMS_VERSION = kafka_streams_version
@@ -443,38 +599,215 @@ class StreamsUpgradeTestJobRunnerService(StreamsTestBaseService):
         self.UPGRADE_TO = upgrade_to
 
     def prop_file(self):
-        properties = {streams_property.STATE_DIR: self.PERSISTENT_ROOT,
-                      streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers()}
+        properties = self.extra_properties.copy()
+        properties[streams_property.STATE_DIR] = self.state_dir
+        properties[streams_property.KAFKA_SERVERS] = self.kafka.bootstrap_servers()
+
         if self.UPGRADE_FROM is not None:
             properties['upgrade.from'] = self.UPGRADE_FROM
         if self.UPGRADE_TO == "future_version":
             properties['test.future.metadata'] = "any_value"
+
+        # Long.MAX_VALUE lets us do the assignment without a warmup
+        properties['acceptable.recovery.lag'] = "9223372036854775807"
+        properties["session.timeout.ms"] = "10000" # set back to 10s for tests. See KIP-735
 
         cfg = KafkaConfig(**properties)
         return cfg.render()
 
     def start_cmd(self, node):
         args = self.args.copy()
-        if self.KAFKA_STREAMS_VERSION in [str(LATEST_0_10_0), str(LATEST_0_10_1), str(LATEST_0_10_2), str(LATEST_0_11_0), str(LATEST_1_0), str(LATEST_1_1)]:
-            args['kafka'] = self.kafka.bootstrap_servers()
-        else:
-            args['kafka'] = ""
-        if self.KAFKA_STREAMS_VERSION == str(LATEST_0_10_0) or self.KAFKA_STREAMS_VERSION == str(LATEST_0_10_1):
-            args['zk'] = self.kafka.zk.connect_setting()
-        else:
-            args['zk'] = ""
         args['config_file'] = self.CONFIG_FILE
         args['stdout'] = self.STDOUT_FILE
         args['stderr'] = self.STDERR_FILE
         args['pidfile'] = self.PID_FILE
-        args['log4j'] = self.LOG4J_CONFIG_FILE
+        args['log4j_param'] = get_log4j_config_param(node)
+        args['log4j'] = get_log4j_config_for_tools(node)
         args['version'] = self.KAFKA_STREAMS_VERSION
         args['kafka_run_class'] = self.path.script("kafka-run-class.sh", node)
 
-        cmd = "( export KAFKA_LOG4J_OPTS=\"-Dlog4j.configuration=file:%(log4j)s\"; " \
+        cmd = "( export KAFKA_LOG4J_OPTS=\"%(log4j_param)s%(log4j)s\"; " \
               "INCLUDE_TEST_JARS=true UPGRADE_KAFKA_STREAMS_TEST_VERSION=%(version)s " \
-              " %(kafka_run_class)s %(streams_class_name)s %(kafka)s %(zk)s %(config_file)s " \
+              " %(kafka_run_class)s %(streams_class_name)s %(config_file)s " \
               " & echo $! >&3 ) 1>> %(stdout)s 2>> %(stderr)s 3> %(pidfile)s" % args
+
+        self.logger.info("Executing: " + cmd)
+
+        return cmd
+
+
+class StreamsNamedRepartitionTopicService(StreamsTestBaseService):
+    def __init__(self, test_context, kafka):
+        super(StreamsNamedRepartitionTopicService, self).__init__(test_context,
+                                                                  kafka,
+                                                                  "org.apache.kafka.streams.tests.StreamsNamedRepartitionTest",
+                                                                  "")
+        self.ADD_ADDITIONAL_OPS = 'false'
+        self.INPUT_TOPIC = None
+        self.AGGREGATION_TOPIC = None
+
+    def prop_file(self):
+        properties = {streams_property.STATE_DIR: self.state_dir,
+                      streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers(),
+                      'input.topic': self.INPUT_TOPIC,
+                      'aggregation.topic': self.AGGREGATION_TOPIC,
+                      'add.operations': self.ADD_ADDITIONAL_OPS,
+                      "acceptable.recovery.lag": "9223372036854775807", # enable a one-shot assignment
+                      "session.timeout.ms": "10000" # set back to 10s for tests. See KIP-735
+                      }
+
+
+        cfg = KafkaConfig(**properties)
+        return cfg.render()
+
+
+class StaticMemberTestService(StreamsTestBaseService):
+    def __init__(self, test_context, kafka, group_instance_id, num_threads, group_protocol="classic",
+                 persistent_process_id_store_enabled=False):
+        super(StaticMemberTestService, self).__init__(test_context,
+                                                      kafka,
+                                                      "org.apache.kafka.streams.tests.StaticMemberTestClient",
+                                                      "")
+        self.INPUT_TOPIC = None
+        self.GROUP_INSTANCE_ID = group_instance_id
+        self.GROUP_PROTOCOL = group_protocol
+        self.NUM_THREADS = num_threads
+        self.PERSISTENT_PROCESS_ID_STORE_ENABLED = persistent_process_id_store_enabled
+
+    def prop_file(self):
+        properties = {streams_property.STATE_DIR: self.state_dir,
+                      streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers(),
+                      streams_property.NUM_THREADS: self.NUM_THREADS,
+                      streams_property.GROUP_PROTOCOL: self.GROUP_PROTOCOL,
+                      consumer_property.GROUP_INSTANCE_ID: self.GROUP_INSTANCE_ID,
+                      consumer_property.SESSION_TIMEOUT_MS: 60000, # set longer session timeout for static member test
+                      'input.topic': self.INPUT_TOPIC,
+                      "acceptable.recovery.lag": "9223372036854775807" # enable a one-shot assignment
+                      }
+
+        if self.PERSISTENT_PROCESS_ID_STORE_ENABLED:
+            properties["persistent.process.id.store.enabled"] = "true"
+
+        cfg = KafkaConfig(**properties)
+        return cfg.render()
+
+
+class CooperativeRebalanceUpgradeService(StreamsTestBaseService):
+    def __init__(self, test_context, kafka):
+        super(CooperativeRebalanceUpgradeService, self).__init__(test_context,
+                                                                 kafka,
+                                                                 "org.apache.kafka.streams.tests.StreamsUpgradeToCooperativeRebalanceTest",
+                                                                 "")
+        self.UPGRADE_FROM = None
+        # these properties will be overridden in test
+        self.SOURCE_TOPIC = None
+        self.SINK_TOPIC = None
+        self.TASK_DELIMITER = "#"
+        self.REPORT_INTERVAL = None
+
+        self.standby_tasks = None
+        self.active_tasks = None
+        self.upgrade_phase = None
+
+    def set_tasks(self, task_string):
+        label = "TASK-ASSIGNMENTS:"
+        task_string_substr = task_string[len(label):]
+        all_tasks = task_string_substr.split(self.TASK_DELIMITER)
+        self.active_tasks = set(all_tasks[0].split(","))
+        if len(all_tasks) > 1:
+            self.standby_tasks = set(all_tasks[1].split(","))
+
+    def set_version(self, kafka_streams_version):
+        self.KAFKA_STREAMS_VERSION = kafka_streams_version
+
+    def set_upgrade_phase(self, upgrade_phase):
+        self.upgrade_phase = upgrade_phase
+
+    def start_cmd(self, node):
+        args = self.args.copy()
+        args['config_file'] = self.CONFIG_FILE
+        args['stdout'] = self.STDOUT_FILE
+        args['stderr'] = self.STDERR_FILE
+        args['pidfile'] = self.PID_FILE
+        args['log4j_param'] = get_log4j_config_param(node)
+        args['log4j'] = get_log4j_config_for_tools(node)
+        args['version'] = self.KAFKA_STREAMS_VERSION
+        args['kafka_run_class'] = self.path.script("kafka-run-class.sh", node)
+
+        cmd = "( export KAFKA_LOG4J_OPTS=\"%(log4j_param)s%(log4j)s\"; " \
+              "INCLUDE_TEST_JARS=true UPGRADE_KAFKA_STREAMS_TEST_VERSION=%(version)s " \
+              " %(kafka_run_class)s %(streams_class_name)s %(config_file)s " \
+              " & echo $! >&3 ) 1>> %(stdout)s 2>> %(stderr)s 3> %(pidfile)s" % args
+
+        self.logger.info("Executing: " + cmd)
+
+        return cmd
+
+    def prop_file(self):
+        properties = {streams_property.STATE_DIR: self.state_dir,
+                      streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers(),
+                      'source.topic': self.SOURCE_TOPIC,
+                      'sink.topic': self.SINK_TOPIC,
+                      'task.delimiter': self.TASK_DELIMITER,
+                      'report.interval': self.REPORT_INTERVAL,
+                      "acceptable.recovery.lag": "9223372036854775807", # enable a one-shot assignment
+                      "session.timeout.ms": "10000" # set back to 10s for tests. See KIP-735
+                      }
+
+        if self.UPGRADE_FROM is not None:
+            properties['upgrade.from'] = self.UPGRADE_FROM
+        else:
+            try:
+                del properties['upgrade.from']
+            except KeyError:
+                self.logger.info("Key 'upgrade.from' not there, better safe than sorry")
+
+        if self.upgrade_phase is not None:
+            properties['upgrade.phase'] = self.upgrade_phase
+
+
+        cfg = KafkaConfig(**properties)
+        return cfg.render()
+
+
+class StreamsTopologyDescriptionPluginService(StreamsTestBaseService):
+    def __init__(self, test_context, kafka, topology_description_push_enabled=True):
+        super(StreamsTopologyDescriptionPluginService, self).__init__(
+            test_context,
+            kafka,
+            "org.apache.kafka.streams.tests.TopologyDescriptionPluginSystemTest",
+            "")
+        self.topology_description_push_enabled = topology_description_push_enabled
+
+    @property
+    def expectedMessage(self):
+        return "STREAMS-STARTED"
+
+    def prop_file(self):
+        properties = {
+            streams_property.STATE_DIR: self.state_dir,
+            streams_property.KAFKA_SERVERS: self.kafka.bootstrap_servers(),
+            streams_property.GROUP_PROTOCOL: "streams",
+            streams_property.TOPOLOGY_DESCRIPTION_PUSH_ENABLED: str(self.topology_description_push_enabled).lower(),
+            "replication.factor": 1,
+            "session.timeout.ms": "10000"
+        }
+        cfg = KafkaConfig(**properties)
+        return cfg.render()
+
+    def start_cmd(self, node):
+        args = self.args.copy()
+        args['config_file'] = self.CONFIG_FILE
+        args['stdout'] = self.STDOUT_FILE
+        args['stderr'] = self.STDERR_FILE
+        args['pidfile'] = self.PID_FILE
+        args['log4j_param'] = get_log4j_config_param(node)
+        args['log4j'] = get_log4j_config_for_tools(node)
+        args['kafka_run_class'] = self.path.script("kafka-run-class.sh", node)
+
+        cmd = "( export KAFKA_LOG4J_OPTS=\"%(log4j_param)s%(log4j)s\"; " \
+              "INCLUDE_TEST_JARS=true %(kafka_run_class)s %(streams_class_name)s " \
+              " %(config_file)s & echo $! >&3 ) 1>> %(stdout)s 2>> %(stderr)s 3> %(pidfile)s" % args
 
         self.logger.info("Executing: " + cmd)
 

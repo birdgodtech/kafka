@@ -17,15 +17,24 @@
 
 package org.apache.kafka.clients.admin;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Collection;
 
 /**
- * Options for {@link AdminClient#describeConsumerGroups(Collection, DescribeConsumerGroupsOptions)}.
+ * Options for {@link Admin#describeConsumerGroups(Collection, DescribeConsumerGroupsOptions)}.
  * <p>
- * The API of this class is evolving, see {@link AdminClient} for details.
  */
-@InterfaceStability.Evolving
+@InterfaceAudience.Public
 public class DescribeConsumerGroupsOptions extends AbstractOptions<DescribeConsumerGroupsOptions> {
+    private boolean includeAuthorizedOperations;
+
+    public DescribeConsumerGroupsOptions includeAuthorizedOperations(boolean includeAuthorizedOperations) {
+        this.includeAuthorizedOperations = includeAuthorizedOperations;
+        return this;
+    }
+
+    public boolean includeAuthorizedOperations() {
+        return includeAuthorizedOperations;
+    }
 }

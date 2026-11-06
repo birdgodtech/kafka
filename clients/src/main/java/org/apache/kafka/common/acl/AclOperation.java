@@ -17,7 +17,7 @@
 
 package org.apache.kafka.common.acl;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.HashMap;
 import java.util.Locale;
@@ -25,22 +25,21 @@ import java.util.Locale;
 /**
  * Represents an operation which an ACL grants or denies permission to perform.
  *
- * Some operations imply other operations.
+ * Some operations imply other operations:
+ * <ul>
+ * <li><code>ALLOW ALL</code> implies <code>ALLOW</code> everything
+ * <li><code>DENY ALL</code> implies <code>DENY</code> everything
  *
- * ALLOW ALL implies ALLOW everything
- * DENY ALL implies DENY everything
+ * <li><code>ALLOW READ</code> implies <code>ALLOW DESCRIBE</code>
+ * <li><code>ALLOW WRITE</code> implies <code>ALLOW DESCRIBE</code>
+ * <li><code>ALLOW DELETE</code> implies <code>ALLOW DESCRIBE</code>
  *
- * ALLOW READ implies ALLOW DESCRIBE
- * ALLOW WRITE implies ALLOW DESCRIBE
- * ALLOW DELETE implies ALLOW DESCRIBE
+ * <li><code>ALLOW ALTER</code> implies <code>ALLOW DESCRIBE</code>
  *
- * ALLOW ALTER implies ALLOW DESCRIBE
- *
- * ALLOW ALTER_CONFIGS implies ALLOW DESCRIBE_CONFIGS
- *
- * The API for this class is still evolving and we may break compatibility in minor releases, if necessary.
+ * <li><code>ALLOW ALTER_CONFIGS</code> implies <code>ALLOW DESCRIBE_CONFIGS</code>
+ * </ul>
  */
-@InterfaceStability.Evolving
+@InterfaceAudience.Public
 public enum AclOperation {
     /**
      * Represents any AclOperation which this client cannot understand, perhaps because this
@@ -106,9 +105,27 @@ public enum AclOperation {
     /**
      * IDEMPOTENT_WRITE operation.
      */
-    IDEMPOTENT_WRITE((byte) 12);
+    IDEMPOTENT_WRITE((byte) 12),
 
-    private final static HashMap<Byte, AclOperation> CODE_TO_VALUE = new HashMap<>();
+    /**
+     * CREATE_TOKENS operation.
+     */
+    CREATE_TOKENS((byte) 13),
+
+    /**
+     * DESCRIBE_TOKENS operation.
+     */
+    DESCRIBE_TOKENS((byte) 14),
+
+    /**
+     * TWO_PHASE_COMMIT operation.
+     */
+    TWO_PHASE_COMMIT((byte) 15);
+
+    // Note: we cannot have more than 30 ACL operations without modifying the format used
+    // to describe ACL operations in MetadataResponse.
+
+    private static final HashMap<Byte, AclOperation> CODE_TO_VALUE = new HashMap<>();
 
     static {
         for (AclOperation operation : AclOperation.values()) {

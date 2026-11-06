@@ -16,11 +16,14 @@
  */
 package org.apache.kafka.connect.storage;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.utils.internals.AppInfoParser;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaAndValue;
 import org.apache.kafka.connect.data.Values;
 import org.apache.kafka.connect.errors.DataException;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,12 +37,18 @@ import java.util.NoSuchElementException;
  * A {@link HeaderConverter} that serializes header values as strings and that deserializes header values to the most appropriate
  * numeric, boolean, array, or map representation. Schemas are not serialized, but are inferred upon deserialization when possible.
  */
+@InterfaceAudience.Public
 public class SimpleHeaderConverter implements HeaderConverter {
 
     private static final Logger LOG = LoggerFactory.getLogger(SimpleHeaderConverter.class);
     private static final ConfigDef CONFIG_DEF = new ConfigDef();
     private static final SchemaAndValue NULL_SCHEMA_AND_VALUE = new SchemaAndValue(null, null);
     private static final Charset UTF_8 = StandardCharsets.UTF_8;
+
+    @Override
+    public String version() {
+        return AppInfoParser.getVersion();
+    }
 
     @Override
     public ConfigDef config() {
@@ -58,9 +67,6 @@ public class SimpleHeaderConverter implements HeaderConverter {
         }
         try {
             String str = new String(value, UTF_8);
-            if (str.isEmpty()) {
-                return new SchemaAndValue(Schema.STRING_SCHEMA, str);
-            }
             return Values.parseString(str);
         } catch (NoSuchElementException e) {
             throw new DataException("Failed to deserialize value for header '" + headerKey + "' on topic '" + topic + "'", e);

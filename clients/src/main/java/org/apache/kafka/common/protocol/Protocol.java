@@ -16,47 +16,69 @@
  */
 package org.apache.kafka.common.protocol;
 
-import org.apache.kafka.common.protocol.types.ArrayOf;
+import org.apache.kafka.common.message.RequestHeaderData;
+import org.apache.kafka.common.message.ResponseHeaderData;
 import org.apache.kafka.common.protocol.types.BoundField;
+import org.apache.kafka.common.protocol.types.Field;
 import org.apache.kafka.common.protocol.types.Schema;
+import org.apache.kafka.common.protocol.types.TaggedFields;
 import org.apache.kafka.common.protocol.types.Type;
-import org.apache.kafka.common.requests.RequestHeader;
-import org.apache.kafka.common.requests.ResponseHeader;
 
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 public class Protocol {
 
     private static String indentString(int size) {
-        StringBuilder b = new StringBuilder(size);
-        for (int i = 0; i < size; i++)
-            b.append(" ");
-        return b.toString();
+        return " ".repeat(Math.max(0, size));
     }
 
     private static void schemaToBnfHtml(Schema schema, StringBuilder b, int indentSize) {
         final String indentStr = indentString(indentSize);
         final Map<String, Type> subTypes = new LinkedHashMap<>();
 
+        b.append(schema.leftBracket());
+        b.append(" ");
         // Top level fields
         for (BoundField field: schema.fields()) {
-            if (field.def.type instanceof ArrayOf) {
-                b.append("[");
+            Type type = field.def.type;
+            if (type.isArray()) {
+                b.append(type.leftBracket());
                 b.append(field.def.name);
-                b.append("] ");
-                Type innerType = ((ArrayOf) field.def.type).type();
-                if (!subTypes.containsKey(field.def.name))
-                    subTypes.put(field.def.name, innerType);
+                b.append(type.rightBracket());
+                b.append(" ");
+                if (!subTypes.containsKey(field.def.name)) {
+                    subTypes.put(field.def.name, type.arrayElementType().get());
+                }
+            } else if (type instanceof TaggedFields) {
+                Map<Integer, Field> taggedFields = new TreeMap<>(((TaggedFields) type).fields());
+                taggedFields.forEach((tag, taggedField) -> {
+                    if (taggedField.type.isArray()) {
+                        b.append(type.leftBracket());
+                        b.append(taggedField.name);
+                        b.append(type.rightBracket());
+                        if (!subTypes.containsKey(taggedField.name))
+                            subTypes.put(taggedField.name + "&lt;tag: " + tag.toString() + "&gt;", taggedField.type.arrayElementType().get());
+                    } else {
+                        b.append(taggedField.name);
+                        if (!subTypes.containsKey(taggedField.name))
+                            subTypes.put(taggedField.name + "&lt;tag: " + tag.toString() + "&gt;", taggedField.type);
+                    }
+                    b.append("&lt;tag: ");
+                    b.append(tag);
+                    b.append("&gt; ");
+                });
             } else {
                 b.append(field.def.name);
                 b.append(" ");
                 if (!subTypes.containsKey(field.def.name))
-                    subTypes.put(field.def.name, field.def.type);
+                    subTypes.put(field.def.name, type);
             }
         }
+        b.append(schema.rightBracket());
         b.append("\n");
 
         // Sub Types/Schemas
@@ -81,13 +103,19 @@ public class Protocol {
     private static void populateSchemaFields(Schema schema, Set<BoundField> fields) {
         for (BoundField field: schema.fields()) {
             fields.add(field);
-            if (field.def.type instanceof ArrayOf) {
-                Type innerType = ((ArrayOf) field.def.type).type();
+            if (field.def.type.isArray()) {
+                Type innerType = field.def.type.arrayElementType().get();
                 if (innerType instanceof Schema)
                     populateSchemaFields((Schema) innerType, fields);
             } else if (field.def.type instanceof Schema)
                 populateSchemaFields((Schema) field.def.type, fields);
         }
+    }
+
+    private static void appendFieldNameToTable(String name, StringBuilder b) {
+        b.append("<td>");
+        b.append(name);
+        b.append("</td>");
     }
 
     private static void schemaToFieldTableHtml(Schema schema, StringBuilder b) {
@@ -101,34 +129,56 @@ public class Protocol {
         b.append("</tr>");
         for (BoundField field : fields) {
             b.append("<tr>\n");
-            b.append("<td>");
-            b.append(field.def.name);
-            b.append("</td>");
-            b.append("<td>");
-            b.append(field.def.docString);
+            if (field.def.type instanceof TaggedFields) {
+                TaggedFields taggedFields = (TaggedFields) field.def.type;
+                // Only include the field in the table if there are actually tags defined
+                if (taggedFields.numFields() > 0) {
+                    taggedFields.fields().forEach((tag, taggedField) -> {
+                        appendFieldNameToTable(taggedField.name + "&lt;tag: " + tag.toString() + "&gt;", b);
+                        b.append("<td>");
+                        b.append(taggedField.docString);
+                        if (taggedField.type.isArray()) {
+                            Type innerType = taggedField.type.arrayElementType().get();
+                            if (innerType instanceof Schema) {
+                                schemaToFieldTableHtml((Schema) innerType, b);
+                            }
+                        } else if (taggedField.type instanceof Schema) {
+                            schemaToFieldTableHtml((Schema) taggedField.type, b);
+                        }
+                        b.append("</td>");
+                        b.append("</tr>\n");
+                    });
+                }
+            } else {
+                appendFieldNameToTable(field.def.name, b);
+                b.append("<td>");
+                b.append(field.def.docString);
+            }
             b.append("</td>");
             b.append("</tr>\n");
         }
-        b.append("</table>\n");
+        b.append("</tbody></table>\n");
     }
 
     public static String toHtml() {
         final StringBuilder b = new StringBuilder();
         b.append("<h5>Headers:</h5>\n");
 
-        b.append("<pre>");
-        b.append("Request Header => ");
-        schemaToBnfHtml(RequestHeader.SCHEMA, b, 2);
-        b.append("</pre>\n");
-        schemaToFieldTableHtml(RequestHeader.SCHEMA, b);
-
-        b.append("<pre>");
-        b.append("Response Header => ");
-        schemaToBnfHtml(ResponseHeader.SCHEMA, b, 2);
-        b.append("</pre>\n");
-        schemaToFieldTableHtml(ResponseHeader.SCHEMA, b);
-
-        for (ApiKeys key : ApiKeys.values()) {
+        for (int i = RequestHeaderData.LOWEST_SUPPORTED_VERSION; i <= RequestHeaderData.HIGHEST_SUPPORTED_VERSION; i++) {
+            b.append("<pre>");
+            b.append("Request Header v").append(i).append(" => ");
+            schemaToBnfHtml(RequestHeaderData.SCHEMAS[i], b, 2);
+            b.append("</pre>\n");
+            schemaToFieldTableHtml(RequestHeaderData.SCHEMAS[i], b);
+        }
+        for (int i = ResponseHeaderData.LOWEST_SUPPORTED_VERSION; i <= ResponseHeaderData.HIGHEST_SUPPORTED_VERSION; i++) {
+            b.append("<pre>");
+            b.append("Response Header v").append(i).append(" => ");
+            schemaToBnfHtml(ResponseHeaderData.SCHEMAS[i], b, 2);
+            b.append("</pre>\n");
+            schemaToFieldTableHtml(ResponseHeaderData.SCHEMAS[i], b);
+        }
+        for (ApiKeys key : ApiKeys.clientApis()) {
             // Key
             b.append("<h5>");
             b.append("<a name=\"The_Messages_" + key.name + "\">");
@@ -138,44 +188,58 @@ public class Protocol {
             b.append("):</a></h5>\n\n");
             // Requests
             b.append("<b>Requests:</b><br>\n");
-            Schema[] requests = key.requestSchemas;
-            for (int i = 0; i < requests.length; i++) {
-                Schema schema = requests[i];
+            Schema[] requests = key.messageType.requestSchemas();
+            for (short version = key.oldestVersion(); version <= key.latestVersion(); version++) {
+                Schema schema = requests[version];
+                if (schema == null)
+                    throw new IllegalStateException("Unexpected null schema for " + key + " with version " + version);
                 // Schema
-                if (schema != null) {
-                    b.append("<p>");
-                    // Version header
-                    b.append("<pre>");
-                    b.append(key.name);
-                    b.append(" Request (Version: ");
-                    b.append(i);
-                    b.append(") => ");
-                    schemaToBnfHtml(requests[i], b, 2);
-                    b.append("</pre>");
-                    schemaToFieldTableHtml(requests[i], b);
+                b.append("<div>");
+                // Version header
+                b.append("<pre>");
+                b.append(key.name);
+                b.append(" Request (Version: ");
+                b.append(version);
+                b.append(") => ");
+                schemaToBnfHtml(schema, b, 2);
+                b.append("</pre>");
+
+                if (!key.isVersionEnabled(version, false)) {
+                    b.append("<p>This version of the request is unstable.</p>");
                 }
+
+                b.append("<p><b>Request header version:</b> ");
+                b.append(key.requestHeaderVersion(version));
                 b.append("</p>\n");
+
+                schemaToFieldTableHtml(schema, b);
+                b.append("</div>\n");
             }
 
             // Responses
             b.append("<b>Responses:</b><br>\n");
-            Schema[] responses = key.responseSchemas;
-            for (int i = 0; i < responses.length; i++) {
-                Schema schema = responses[i];
+            Schema[] responses = key.messageType.responseSchemas();
+            for (int version = key.oldestVersion(); version <= key.latestVersion(); version++) {
+                Schema schema = responses[version];
+                if (schema == null)
+                    throw new IllegalStateException("Unexpected null schema for " + key + " with version " + version);
                 // Schema
-                if (schema != null) {
-                    b.append("<p>");
-                    // Version header
-                    b.append("<pre>");
-                    b.append(key.name);
-                    b.append(" Response (Version: ");
-                    b.append(i);
-                    b.append(") => ");
-                    schemaToBnfHtml(responses[i], b, 2);
-                    b.append("</pre>");
-                    schemaToFieldTableHtml(responses[i], b);
-                }
+                b.append("<div>");
+                // Version header
+                b.append("<pre>");
+                b.append(key.name);
+                b.append(" Response (Version: ");
+                b.append(version);
+                b.append(") => ");
+                schemaToBnfHtml(schema, b, 2);
+                b.append("</pre>");
+
+                b.append("<p><b>Response header version:</b> ");
+                b.append(key.responseHeaderVersion((short) version));
                 b.append("</p>\n");
+
+                schemaToFieldTableHtml(schema, b);
+                b.append("</div>\n");
             }
         }
 

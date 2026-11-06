@@ -14,14 +14,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common;
 
-import java.io.Serializable;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
+import java.io.Serializable;
+import java.util.Objects;
 
 /**
  * The topic name, partition number and the brokerId of the replica
  */
+@InterfaceAudience.Public
 public final class TopicPartitionReplica implements Serializable {
 
     private int hash = 0;
@@ -30,7 +34,7 @@ public final class TopicPartitionReplica implements Serializable {
     private final String topic;
 
     public TopicPartitionReplica(String topic, int partition, int brokerId) {
-        this.topic = topic;
+        this.topic = Objects.requireNonNull(topic);
         this.partition = partition;
         this.brokerId = brokerId;
     }
@@ -54,7 +58,7 @@ public final class TopicPartitionReplica implements Serializable {
         }
         final int prime = 31;
         int result = 1;
-        result = prime * result + ((topic == null) ? 0 : topic.hashCode());
+        result = prime * result + topic.hashCode();
         result = prime * result + partition;
         result = prime * result + brokerId;
         this.hash = result;
@@ -70,18 +74,7 @@ public final class TopicPartitionReplica implements Serializable {
         if (getClass() != obj.getClass())
             return false;
         TopicPartitionReplica other = (TopicPartitionReplica) obj;
-        if (partition != other.partition)
-            return false;
-        if (brokerId != other.brokerId)
-            return false;
-        if (topic == null) {
-            if (other.topic != null) {
-                return false;
-            }
-        } else if (!topic.equals(other.topic)) {
-            return false;
-        }
-        return true;
+        return partition == other.partition && brokerId == other.brokerId && topic.equals(other.topic);
     }
 
     @Override

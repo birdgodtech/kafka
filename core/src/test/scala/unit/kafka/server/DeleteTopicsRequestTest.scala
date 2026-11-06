@@ -17,107 +17,142 @@
 
 package kafka.server
 
+import java.util
 import kafka.network.SocketServer
-import kafka.utils._
+import kafka.utils.{Logging, TestUtils}
+import org.apache.kafka.common.message.DeleteTopicsRequestData
+import org.apache.kafka.common.message.DeleteTopicsRequestData.DeleteTopicState
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
-import org.apache.kafka.common.requests.{DeleteTopicsRequest, DeleteTopicsResponse, MetadataRequest, MetadataResponse}
-import org.junit.Assert._
-import org.junit.Test
+import org.apache.kafka.common.requests.DeleteTopicsRequest
+import org.apache.kafka.common.requests.DeleteTopicsResponse
+import org.apache.kafka.common.requests.MetadataRequest
+import org.apache.kafka.common.requests.MetadataResponse
+import org.junit.jupiter.api.Assertions._
+import org.junit.jupiter.api.Test
 
-import scala.collection.JavaConverters._
+import scala.collection.Seq
+import scala.jdk.CollectionConverters._
 
-class DeleteTopicsRequestTest extends BaseRequestTest {
+class DeleteTopicsRequestTest extends BaseRequestTest with Logging {
 
   @Test
-  def testValidDeleteTopicRequests() {
+  def testTopicDeletionClusterHasOfflinePartitions(): Unit = {
+    // Create two topics with one partition/replica. Make one of them offline.
+    val offlineTopic = "topic-1"
+    val onlineTopic = "topic-2"
+    createTopicWithAssignment(offlineTopic, Map[Int, Seq[Int]](0 -> Seq(0)))
+    createTopicWithAssignment(onlineTopic, Map[Int, Seq[Int]](0 -> Seq(1)))
+    killBroker(0)
+    ensureConsistentKRaftMetadata()
+
+    // Ensure one topic partition is offline.
+    TestUtils.waitUntilTrue(() => {
+      aliveBrokers.head.metadataCache.getLeaderAndIsr(onlineTopic, 0).filter(_.leader() == 1).isPresent() &&
+        aliveBrokers.head.metadataCache.getLeaderAndIsr(offlineTopic, 0).filter(_.leader() ==
+          MetadataResponse.NO_LEADER_ID).isPresent()
+    }, "Topic partition is not offline")
+
+    // Delete the newly created topic and topic with offline partition. See the deletion is
+    // successful.
+    deleteTopic(onlineTopic)
+    deleteTopic(offlineTopic)
+    ensureConsistentKRaftMetadata()
+
+    // Restart the dead broker.
+    restartDeadBrokers()
+
+    // Make sure the brokers no longer see any deleted topics.
+    TestUtils.waitUntilTrue(() =>
+      !aliveBrokers.forall(_.metadataCache.contains(onlineTopic)) &&
+        !aliveBrokers.forall(_.metadataCache.contains(offlineTopic)),
+      "The topics are found in the Broker's cache")
+  }
+
+  @Test
+  def testValidDeleteTopicRequests(): Unit = {
     val timeout = 10000
     // Single topic
-    createTopic("topic-1", 1, 1)
-    validateValidDeleteTopicRequests(new DeleteTopicsRequest.Builder(Set("topic-1").asJava, timeout).build())
+    createTopic("topic-1")
+    validateValidDeleteTopicRequests(new DeleteTopicsRequest.Builder(
+        new DeleteTopicsRequestData()
+          .setTopicNames(util.Arrays.asList("topic-1"))
+          .setTimeoutMs(timeout)).build())
     // Multi topic
     createTopic("topic-3", 5, 2)
     createTopic("topic-4", 1, 2)
-    validateValidDeleteTopicRequests(new DeleteTopicsRequest.Builder(Set("topic-3", "topic-4").asJava, timeout).build())
+    validateValidDeleteTopicRequests(new DeleteTopicsRequest.Builder(
+        new DeleteTopicsRequestData()
+          .setTopicNames(util.Arrays.asList("topic-3", "topic-4"))
+          .setTimeoutMs(timeout)).build())
+
+    // Topic Ids
+    createTopic("topic-7", 3, 2)
+    createTopic("topic-6", 1, 2)
+    val ids = getTopicIds()
+    validateValidDeleteTopicRequestsWithIds(new DeleteTopicsRequest.Builder(
+      new DeleteTopicsRequestData()
+        .setTopics(util.Arrays.asList(new DeleteTopicState().setTopicId(ids("topic-7")),
+             new DeleteTopicState().setTopicId(ids("topic-6"))
+        )
+      ).setTimeoutMs(timeout)).build())
   }
 
   private def validateValidDeleteTopicRequests(request: DeleteTopicsRequest): Unit = {
     val response = sendDeleteTopicsRequest(request)
+    val error = response.errorCounts.asScala.find(_._1 != Errors.NONE)
+    assertTrue(error.isEmpty, s"There should be no errors, found ${response.data.responses.asScala}")
 
-    val error = response.errors.values.asScala.find(_ != Errors.NONE)
-    assertTrue(s"There should be no errors, found ${response.errors.asScala}", error.isEmpty)
+    ensureConsistentKRaftMetadata()
 
-    request.topics.asScala.foreach { topic =>
+    request.data.topicNames.forEach { topic =>
       validateTopicIsDeleted(topic)
     }
   }
 
-  @Test
-  def testErrorDeleteTopicRequests() {
-    val timeout = 30000
-    val timeoutTopic = "invalid-timeout"
-
-    // Basic
-    validateErrorDeleteTopicRequests(new DeleteTopicsRequest.Builder(Set("invalid-topic").asJava, timeout).build(),
-      Map("invalid-topic" -> Errors.UNKNOWN_TOPIC_OR_PARTITION))
-
-    // Partial
-    createTopic("partial-topic-1", 1, 1)
-    validateErrorDeleteTopicRequests(new DeleteTopicsRequest.Builder(Set(
-      "partial-topic-1",
-      "partial-invalid-topic").asJava, timeout).build(),
-      Map(
-        "partial-topic-1" -> Errors.NONE,
-        "partial-invalid-topic" -> Errors.UNKNOWN_TOPIC_OR_PARTITION
-      )
-    )
-
-    // Timeout
-    createTopic(timeoutTopic, 5, 2)
-    // Must be a 0ms timeout to avoid transient test failures. Even a timeout of 1ms has succeeded in the past.
-    validateErrorDeleteTopicRequests(new DeleteTopicsRequest.Builder(Set(timeoutTopic).asJava, 0).build(),
-      Map(timeoutTopic -> Errors.REQUEST_TIMED_OUT))
-    // The topic should still get deleted eventually
-    TestUtils.waitUntilTrue(() => !servers.head.metadataCache.contains(timeoutTopic), s"Topic $timeoutTopic is never deleted")
-    validateTopicIsDeleted(timeoutTopic)
-  }
-
-  private def validateErrorDeleteTopicRequests(request: DeleteTopicsRequest, expectedResponse: Map[String, Errors]): Unit = {
+  private def validateValidDeleteTopicRequestsWithIds(request: DeleteTopicsRequest): Unit = {
     val response = sendDeleteTopicsRequest(request)
-    val errors = response.errors.asScala
-    assertEquals("The response size should match", expectedResponse.size, response.errors.size)
+    val error = response.errorCounts.asScala.find(_._1 != Errors.NONE)
+    assertTrue(error.isEmpty, s"There should be no errors, found ${response.data.responses.asScala}")
 
-    expectedResponse.foreach { case (topic, expectedError) =>
-      assertEquals("The response error should match", expectedResponse(topic), errors(topic))
-      // If no error validate the topic was deleted
-      if (expectedError == Errors.NONE) {
-        validateTopicIsDeleted(topic)
-      }
+    ensureConsistentKRaftMetadata()
+
+    response.data.responses.forEach { response =>
+      validateTopicIsDeleted(response.name())
     }
   }
 
-  @Test
-  def testNotController() {
-    val request = new DeleteTopicsRequest.Builder(Set("not-controller").asJava, 1000).build()
-    val response = sendDeleteTopicsRequest(request, notControllerSocketServer)
-
-    val error = response.errors.asScala.head._2
-    assertEquals("Expected controller error when routed incorrectly",  Errors.NOT_CONTROLLER, error)
-  }
-
   private def validateTopicIsDeleted(topic: String): Unit = {
-    val metadata = sendMetadataRequest(new MetadataRequest.
-        Builder(List(topic).asJava, true).build).topicMetadata.asScala
-    TestUtils.waitUntilTrue (() => !metadata.exists(p => p.topic.equals(topic) && p.error == Errors.NONE),
+    val metadata = connectAndReceive[MetadataResponse](new MetadataRequest.Builder(
+      List(topic).asJava, true).build).topicMetadata.asScala
+    TestUtils.waitUntilTrue(() => !metadata.exists(p => p.topic.equals(topic) && p.error == Errors.NONE),
       s"The topic $topic should not exist")
   }
 
-  private def sendDeleteTopicsRequest(request: DeleteTopicsRequest, socketServer: SocketServer = controllerSocketServer): DeleteTopicsResponse = {
-    val response = connectAndSend(request, ApiKeys.DELETE_TOPICS, socketServer)
-    DeleteTopicsResponse.parse(response, request.version)
+  private def sendDeleteTopicsRequest(
+    request: DeleteTopicsRequest,
+    socketServer: SocketServer = adminSocketServer
+  ): DeleteTopicsResponse = {
+    connectAndReceive[DeleteTopicsResponse](request, destination = socketServer)
   }
 
-  private def sendMetadataRequest(request: MetadataRequest): MetadataResponse = {
-    val response = connectAndSend(request, ApiKeys.METADATA)
-    MetadataResponse.parse(response, request.version)
+  @Test
+  def testDeleteTopicsVersions(): Unit = {
+    val timeout = 10000
+    for (version <- ApiKeys.DELETE_TOPICS.oldestVersion to ApiKeys.DELETE_TOPICS.latestVersion) {
+      info(s"Creating and deleting tests for version $version")
+
+      val topicName = s"topic-$version"
+
+        createTopic(topicName)
+        val data = new DeleteTopicsRequestData().setTimeoutMs(timeout)
+
+        if (version < 6) {
+          data.setTopicNames(util.Arrays.asList(topicName))
+        } else {
+          data.setTopics(util.Arrays.asList(new DeleteTopicState().setName(topicName)))
+        }
+
+        validateValidDeleteTopicRequests(new DeleteTopicsRequest.Builder(data).build(version.toShort))
+    }
   }
 }

@@ -16,8 +16,16 @@
  */
 package org.apache.kafka.common.security.oauthbearer.internals.unsecured;
 
-import java.io.IOException;
-import java.util.Collections;
+import org.apache.kafka.common.security.auth.AuthenticateCallbackHandler;
+import org.apache.kafka.common.security.oauthbearer.OAuthBearerExtensionsValidatorCallback;
+import org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule;
+import org.apache.kafka.common.security.oauthbearer.OAuthBearerValidatorCallback;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Utils;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -25,13 +33,6 @@ import java.util.Objects;
 import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.UnsupportedCallbackException;
 import javax.security.auth.login.AppConfigurationEntry;
-
-import org.apache.kafka.common.security.auth.AuthenticateCallbackHandler;
-import org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule;
-import org.apache.kafka.common.security.oauthbearer.OAuthBearerValidatorCallback;
-import org.apache.kafka.common.utils.Time;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * A {@code CallbackHandler} that recognizes
@@ -58,7 +59,7 @@ import org.slf4j.LoggerFactory;
  * clock skew (the default is 0)</li>
  * <ul>
  * For example:
- * 
+ *
  * <pre>
  * KafkaServer {
  *      org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule Required
@@ -68,11 +69,14 @@ import org.slf4j.LoggerFactory;
  *      unsecuredValidatorAllowableClockSkewMs="3000";
  * };
  * </pre>
- * 
+ * It also recognizes {@link OAuthBearerExtensionsValidatorCallback} and validates every extension passed to it.
+ *
  * This class is the default when the SASL mechanism is OAUTHBEARER and no value
  * is explicitly set via the
  * {@code listener.name.sasl_[plaintext|ssl].oauthbearer.sasl.server.callback.handler.class}
  * broker configuration property.
+ * It is worth noting that this class is not suitable for production use due to the use of unsecured JWT tokens and
+ * validation of every given extension.
  */
 public class OAuthBearerUnsecuredValidatorCallbackHandler implements AuthenticateCallbackHandler {
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerUnsecuredValidatorCallbackHandler.class);
@@ -87,7 +91,7 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
 
     /**
      * For testing
-     * 
+     *
      * @param time
      *            the mandatory time to set
      */
@@ -97,7 +101,7 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
 
     /**
      * Return true if this instance has been configured, otherwise false
-     * 
+     *
      * @return true if this instance has been configured, otherwise false
      */
     public boolean configured() {
@@ -113,14 +117,12 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
             throw new IllegalArgumentException(
                     String.format("Must supply exactly 1 non-null JAAS mechanism configuration (size was %d)",
                             jaasConfigEntries.size()));
-        final Map<String, String> unmodifiableModuleOptions = Collections
-                .unmodifiableMap((Map<String, String>) jaasConfigEntries.get(0).getOptions());
-        this.moduleOptions = unmodifiableModuleOptions;
+        this.moduleOptions = Map.copyOf((Map<String, String>) jaasConfigEntries.get(0).getOptions());
         configured = true;
     }
 
     @Override
-    public void handle(Callback[] callbacks) throws IOException, UnsupportedCallbackException {
+    public void handle(Callback[] callbacks) throws UnsupportedCallbackException {
         if (!configured())
             throw new IllegalStateException("Callback handler not configured");
         for (Callback callback : callbacks) {
@@ -134,6 +136,9 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
                     validationCallback.error(failureScope != null ? "insufficient_scope" : "invalid_token",
                             failureScope, failureReason.failureOpenIdConfig());
                 }
+            } else if (callback instanceof OAuthBearerExtensionsValidatorCallback) {
+                OAuthBearerExtensionsValidatorCallback extensionsCallback = (OAuthBearerExtensionsValidatorCallback) callback;
+                extensionsCallback.inputExtensions().map().forEach((extensionName, v) -> extensionsCallback.valid(extensionName));
             } else
                 throw new UnsupportedCallbackException(callback);
         }
@@ -165,40 +170,30 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
         OAuthBearerValidationUtils.validateTimeConsistency(unsecuredJwt).throwExceptionIfFailed();
         OAuthBearerValidationUtils.validateScope(unsecuredJwt, requiredScope).throwExceptionIfFailed();
         log.info("Successfully validated token with principal {}: {}", unsecuredJwt.principalName(),
-                unsecuredJwt.claims().toString());
+                unsecuredJwt.claims());
         callback.token(unsecuredJwt);
     }
 
     private String principalClaimName() {
         String principalClaimNameValue = option(PRINCIPAL_CLAIM_NAME_OPTION);
-        String principalClaimName = principalClaimNameValue != null && !principalClaimNameValue.trim().isEmpty()
-                ? principalClaimNameValue.trim()
-                : "sub";
-        return principalClaimName;
+        return Utils.isBlank(principalClaimNameValue) ? "sub" : principalClaimNameValue.trim();
     }
 
     private String scopeClaimName() {
         String scopeClaimNameValue = option(SCOPE_CLAIM_NAME_OPTION);
-        String scopeClaimName = scopeClaimNameValue != null && !scopeClaimNameValue.trim().isEmpty()
-                ? scopeClaimNameValue.trim()
-                : "scope";
-        return scopeClaimName;
+        return Utils.isBlank(scopeClaimNameValue) ? "scope" : scopeClaimNameValue.trim();
     }
 
     private List<String> requiredScope() {
         String requiredSpaceDelimitedScope = option(REQUIRED_SCOPE_OPTION);
-        List<String> requiredScope = requiredSpaceDelimitedScope == null || requiredSpaceDelimitedScope.trim().isEmpty()
-                ? Collections.<String>emptyList()
-                : OAuthBearerScopeUtils.parseScope(requiredSpaceDelimitedScope.trim());
-        return requiredScope;
+        return Utils.isBlank(requiredSpaceDelimitedScope) ? List.of() : OAuthBearerScopeUtils.parseScope(requiredSpaceDelimitedScope.trim());
     }
 
     private int allowableClockSkewMs() {
         String allowableClockSkewMsValue = option(ALLOWABLE_CLOCK_SKEW_MILLIS_OPTION);
-        int allowableClockSkewMs = 0;
+        int allowableClockSkewMs;
         try {
-            allowableClockSkewMs = allowableClockSkewMsValue == null || allowableClockSkewMsValue.trim().isEmpty() ? 0
-                    : Integer.parseInt(allowableClockSkewMsValue.trim());
+            allowableClockSkewMs = Utils.isBlank(allowableClockSkewMsValue) ? 0 : Integer.parseInt(allowableClockSkewMsValue.trim());
         } catch (NumberFormatException e) {
             throw new OAuthBearerConfigException(e.getMessage(), e);
         }

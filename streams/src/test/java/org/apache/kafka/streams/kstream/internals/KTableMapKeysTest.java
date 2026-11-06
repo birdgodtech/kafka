@@ -16,72 +16,84 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
-
 import org.apache.kafka.common.serialization.IntegerSerializer;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.streams.KeyValueTimestamp;
 import org.apache.kafka.streams.StreamsBuilder;
+import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.streams.TopologyTestDriver;
+import org.apache.kafka.streams.TopologyTestDriverBuilder;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.KTable;
-import org.apache.kafka.streams.kstream.KeyValueMapper;
-import org.apache.kafka.streams.test.ConsumerRecordFactory;
-import org.apache.kafka.test.MockProcessorSupplier;
+import org.apache.kafka.test.MockApiProcessorSupplier;
 import org.apache.kafka.test.StreamsTestUtils;
-import org.junit.Test;
+
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class KTableMapKeysTest {
+    private final Properties props = StreamsTestUtils.getStreamsConfig(Serdes.Integer(), Serdes.String());
 
-    private final ConsumerRecordFactory<Integer, String> recordFactory = new ConsumerRecordFactory<>(new IntegerSerializer(), new StringSerializer());
-    private final Properties props = StreamsTestUtils.topologyTestConfig(Serdes.Integer(), Serdes.String());
-
-    @Test
-    public void testMapKeysConvertingToStream() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testMapKeysConvertingToStream(final boolean withHeaders) {
+        setDslStoreFormat(withHeaders);
         final StreamsBuilder builder = new StreamsBuilder();
+        final String topic1 = "topic_map_keys";
 
-        String topic1 = "topic_map_keys";
-
-        KTable<Integer, String> table1 = builder.table(topic1, Consumed.with(Serdes.Integer(), Serdes.String()));
+        final KTable<Integer, String> table1 = builder.table(topic1, Consumed.with(Serdes.Integer(), Serdes.String()));
 
         final Map<Integer, String> keyMap = new HashMap<>();
         keyMap.put(1, "ONE");
         keyMap.put(2, "TWO");
         keyMap.put(3, "THREE");
 
-        KeyValueMapper<Integer, String, String> keyMapper = new KeyValueMapper<Integer, String, String>() {
-            @Override
-            public  String apply(Integer key, String value) {
-                return keyMap.get(key);
-            }
-        };
+        final KStream<String, String> convertedStream = table1.toStream((key, value) -> keyMap.get(key));
 
-        KStream<String, String> convertedStream = table1.toStream(keyMapper);
+        final KeyValueTimestamp[] expected = new KeyValueTimestamp[] {new KeyValueTimestamp<>("ONE", "V_ONE", 5),
+            new KeyValueTimestamp<>("TWO", "V_TWO", 10),
+            new KeyValueTimestamp<>("THREE", "V_THREE", 15)};
+        final int[] originalKeys = new int[] {1, 2, 3};
+        final String[] values = new String[] {"V_ONE", "V_TWO", "V_THREE"};
 
-        final String[] expected = new String[]{"ONE:V_ONE", "TWO:V_TWO", "THREE:V_THREE"};
-        final int[] originalKeys = new int[]{1, 2, 3};
-        final String[] values = new String[]{"V_ONE", "V_TWO", "V_THREE"};
-
-        MockProcessorSupplier<String, String> supplier = new MockProcessorSupplier<>();
-
+        final MockApiProcessorSupplier<String, String, Void, Void> supplier = new MockApiProcessorSupplier<>();
         convertedStream.process(supplier);
 
-        try (final TopologyTestDriver driver = new TopologyTestDriver(builder.build(), props)) {
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
             for (int i = 0; i < originalKeys.length; i++) {
-                driver.pipeInput(recordFactory.create(topic1, originalKeys[i], values[i]));
+                final TestInputTopic<Integer, String> inputTopic =
+                        driver.createInputTopic(topic1, new IntegerSerializer(), new StringSerializer());
+                inputTopic.pipeInput(originalKeys[i], values[i], 5 + i * 5);
             }
         }
 
-        assertEquals(3, supplier.theCapturedProcessor().processed.size());
-
+        assertEquals(3, supplier.theCapturedProcessor().processed().size());
         for (int i = 0; i < expected.length; i++) {
-            assertEquals(expected[i], supplier.theCapturedProcessor().processed.get(i));
+            assertEquals(expected[i], supplier.theCapturedProcessor().processed().get(i));
+        }
+    }
+
+    /**
+     * Configures the DSL store format to use headers if enabled.
+     * This is a helper method to reduce boilerplate in parameterized tests that test both
+     * with and without headers mode.
+     *
+     * @param withHeaders Whether to enable headers mode
+     */
+    private void setDslStoreFormat(final boolean withHeaders) {
+        if (withHeaders) {
+            props.put(StreamsConfig.DSL_STORE_FORMAT_CONFIG, StreamsConfig.DSL_STORE_FORMAT_HEADERS);
+        } else {
+            props.put(StreamsConfig.DSL_STORE_FORMAT_CONFIG, StreamsConfig.DSL_STORE_FORMAT_DEFAULT);
         }
     }
 }

@@ -16,33 +16,51 @@
  */
 package org.apache.kafka.connect.runtime;
 
-import org.apache.kafka.connect.runtime.distributed.ClusterConfigState;
+import org.apache.kafka.common.metrics.PluginMetrics;
 import org.apache.kafka.connect.source.SourceTaskContext;
+import org.apache.kafka.connect.storage.ClusterConfigState;
 import org.apache.kafka.connect.storage.OffsetStorageReader;
+import org.apache.kafka.connect.util.ConnectorTaskId;
 
 import java.util.Map;
 
 public class WorkerSourceTaskContext implements SourceTaskContext {
 
     private final OffsetStorageReader reader;
-    private final WorkerSourceTask task;
+    private final ConnectorTaskId id;
     private final ClusterConfigState configState;
+    private final WorkerTransactionContext transactionContext;
+    private final PluginMetrics pluginMetrics;
 
     public WorkerSourceTaskContext(OffsetStorageReader reader,
-                                   WorkerSourceTask task,
-                                   ClusterConfigState configState) {
+                                   ConnectorTaskId id,
+                                   ClusterConfigState configState,
+                                   WorkerTransactionContext transactionContext,
+                                   PluginMetrics pluginMetrics) {
         this.reader = reader;
-        this.task = task;
+        this.id = id;
         this.configState = configState;
+        this.transactionContext = transactionContext;
+        this.pluginMetrics = pluginMetrics;
     }
 
     @Override
     public Map<String, String> configs() {
-        return configState.taskConfig(task.id());
+        return configState.taskConfig(id);
     }
 
     @Override
     public OffsetStorageReader offsetStorageReader() {
         return reader;
+    }
+
+    @Override
+    public WorkerTransactionContext transactionContext() {
+        return transactionContext;
+    }
+
+    @Override
+    public PluginMetrics pluginMetrics() {
+        return pluginMetrics;
     }
 }

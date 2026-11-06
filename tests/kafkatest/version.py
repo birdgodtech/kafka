@@ -14,9 +14,8 @@
 # limitations under the License.
 
 
-from kafkatest.utils import kafkatest_version
-
 from distutils.version import LooseVersion
+from kafkatest.utils import kafkatest_version
 
 
 class KafkaVersion(LooseVersion):
@@ -50,6 +49,79 @@ class KafkaVersion(LooseVersion):
         else:
             return LooseVersion.__str__(self)
 
+    def _cmp(self, other):
+        if isinstance(other, str):
+            other = KafkaVersion(other)
+
+        if other.is_dev:
+            if self.is_dev:
+                return 0
+            return -1
+        elif self.is_dev:
+            return 1
+
+        return LooseVersion._cmp(self, other)
+
+    def topic_command_supports_bootstrap_server(self):
+        return self >= V_2_3_0
+
+    def topic_command_supports_if_not_exists_with_bootstrap_server(self):
+        return self >= V_2_6_0
+
+    def supports_tls_to_zookeeper(self):
+        # indicate if KIP-515 is available
+        return self >= V_2_5_0
+
+    def reassign_partitions_command_supports_bootstrap_server(self):
+        return self >= V_2_5_0
+
+    def kafka_configs_command_uses_bootstrap_server(self):
+        # everything except User SCRAM Credentials (KIP-554)
+        return self >= V_2_6_0
+
+    def kafka_configs_command_uses_bootstrap_server_scram(self):
+        # User SCRAM Credentials (KIP-554)
+        return self >= V_2_7_0
+
+    def supports_topic_ids_when_using_zk(self):
+        # Supports topic IDs as described by KIP-516.
+        # Self-managed clusters always support topic ID, so this method only applies to ZK clusters.
+        return self >= V_2_8_0
+
+    def supports_fk_joins(self):
+        # while we support FK joins since 2.4, rolling upgrade is broken in older versions
+        # it's only fixed in 3.3.3 (unreleased) and 3.4.0
+        # -> https://issues.apache.org/jira/browse/KAFKA-14646
+        return hasattr(self, "version") and self >= V_3_4_0
+
+    def supports_feature_command(self):
+        return self >= V_3_8_0
+
+    def supports_command_config(self):
+        # According to KIP-1147, --producer.config and --consumer.config have been deprecated and will be removed in future versions
+        # For backward compatibility, we select the configuration based on node version:
+        # - For versions 4.2.0 and above, use --command-config
+        # - For older versions, continue using --producer.config or --consumer.config
+        return self >= V_4_2_0
+
+    def supports_command_property(self):
+        # According to KIP-1147, --producer-property and --consumer-property have been deprecated and will be removed in future versions
+        # For backward compatibility, we select the configuration based on node version:
+        # - For versions 4.2.0 and above, use --command-property
+        # - For older versions, continue using --producer-property or --consumer-property
+        return self >= V_4_2_0
+
+    def supports_formatter_property(self):
+        # According to KIP-1147, --property has been deprecated and will be removed in future versions
+        # For backward compatibility, we select the configuration based on node version:
+        # - For versions 4.2.0 and above, use --formatter-property
+        # - For older versions, continue using --property
+        return self >= V_4_2_0
+
+    def supports_consumer_close_timeout(self):
+        # The VerifiableConsumer --close-timeout option was added in the 4.4.0 development cycle.
+        # Older versions do not recognize the argument and fail to start, so only pass it on newer versions.
+        return self >= V_4_4_0
 
 def get_version(node=None):
     """Return the version attached to the given node.
@@ -61,51 +133,138 @@ def get_version(node=None):
         return DEV_BRANCH
 
 DEV_BRANCH = KafkaVersion("dev")
-DEV_VERSION = KafkaVersion("2.1.0-SNAPSHOT")
+DEV_VERSION = KafkaVersion("4.5.0-SNAPSHOT")
 
-# 0.8.2.x versions
-V_0_8_2_1 = KafkaVersion("0.8.2.1")
-V_0_8_2_2 = KafkaVersion("0.8.2.2")
-LATEST_0_8_2 = V_0_8_2_2
+LATEST_STABLE_TRANSACTION_VERSION = 2
+# This should match the LATEST_PRODUCTION version defined in MetadataVersion.java
+LATEST_STABLE_METADATA_VERSION = "4.4-IV2"
 
-# 0.9.0.x versions
-V_0_9_0_0 = KafkaVersion("0.9.0.0")
-V_0_9_0_1 = KafkaVersion("0.9.0.1")
-LATEST_0_9 = V_0_9_0_1
+# 2.1.x versions
+V_2_1_0 = KafkaVersion("2.1.0")
+V_2_1_1 = KafkaVersion("2.1.1")
+LATEST_2_1 = V_2_1_1
 
-# 0.10.0.x versions
-V_0_10_0_0 = KafkaVersion("0.10.0.0")
-V_0_10_0_1 = KafkaVersion("0.10.0.1")
-LATEST_0_10_0 = V_0_10_0_1
+# 2.2.x versions
+V_2_2_0 = KafkaVersion("2.2.0")
+V_2_2_1 = KafkaVersion("2.2.1")
+V_2_2_2 = KafkaVersion("2.2.2")
+LATEST_2_2 = V_2_2_2
 
-# 0.10.1.x versions
-V_0_10_1_0 = KafkaVersion("0.10.1.0")
-V_0_10_1_1 = KafkaVersion("0.10.1.1")
-LATEST_0_10_1 = V_0_10_1_1
+# 2.3.x versions
+V_2_3_0 = KafkaVersion("2.3.0")
+V_2_3_1 = KafkaVersion("2.3.1")
+LATEST_2_3 = V_2_3_1
 
-# 0.10.2.x versions
-V_0_10_2_0 = KafkaVersion("0.10.2.0")
-V_0_10_2_1 = KafkaVersion("0.10.2.1")
-LATEST_0_10_2 = V_0_10_2_1
+# 2.4.x versions
+V_2_4_0 = KafkaVersion("2.4.0")
+V_2_4_1 = KafkaVersion("2.4.1")
+LATEST_2_4 = V_2_4_1
 
-LATEST_0_10 = LATEST_0_10_2
+# 2.5.x versions
+V_2_5_0 = KafkaVersion("2.5.0")
+V_2_5_1 = KafkaVersion("2.5.1")
+LATEST_2_5 = V_2_5_1
 
-# 0.11.0.x versions
-V_0_11_0_0 = KafkaVersion("0.11.0.0")
-V_0_11_0_1 = KafkaVersion("0.11.0.1")
-V_0_11_0_2 = KafkaVersion("0.11.0.2")
-LATEST_0_11_0 = V_0_11_0_2
-LATEST_0_11 = LATEST_0_11_0
+# 2.6.x versions
+V_2_6_0 = KafkaVersion("2.6.0")
+V_2_6_1 = KafkaVersion("2.6.1")
+V_2_6_2 = KafkaVersion("2.6.2")
+V_2_6_3 = KafkaVersion("2.6.3")
+LATEST_2_6 = V_2_6_3
 
-# 1.0.x versions
-V_1_0_0 = KafkaVersion("1.0.0")
-V_1_0_1 = KafkaVersion("1.0.1")
-LATEST_1_0 = V_1_0_1
+# 2.7.x versions
+V_2_7_0 = KafkaVersion("2.7.0")
+V_2_7_1 = KafkaVersion("2.7.1")
+V_2_7_2 = KafkaVersion("2.7.2")
+LATEST_2_7 = V_2_7_2
 
-# 1.1.x versions
-V_1_1_0 = KafkaVersion("1.1.0")
-LATEST_1_1 = V_1_1_0
+# 2.8.x versions
+V_2_8_0 = KafkaVersion("2.8.0")
+V_2_8_1 = KafkaVersion("2.8.1")
+V_2_8_2 = KafkaVersion("2.8.2")
+LATEST_2_8 = V_2_8_2
 
-# 2.0.x versions
-V_2_0_0 = KafkaVersion("2.0.0")
-LATEST_2_0 = V_2_0_0
+# 3.0.x versions
+V_3_0_0 = KafkaVersion("3.0.0")
+V_3_0_1 = KafkaVersion("3.0.1")
+V_3_0_2 = KafkaVersion("3.0.2")
+LATEST_3_0 = V_3_0_2
+
+# 3.1.x versions
+V_3_1_0 = KafkaVersion("3.1.0")
+V_3_1_1 = KafkaVersion("3.1.1")
+V_3_1_2 = KafkaVersion("3.1.2")
+LATEST_3_1 = V_3_1_2
+
+# 3.2.x versions
+V_3_2_0 = KafkaVersion("3.2.0")
+V_3_2_1 = KafkaVersion("3.2.1")
+V_3_2_2 = KafkaVersion("3.2.2")
+V_3_2_3 = KafkaVersion("3.2.3")
+LATEST_3_2 = V_3_2_3
+
+# 3.3.x versions
+V_3_3_0 = KafkaVersion("3.3.0")
+V_3_3_1 = KafkaVersion("3.3.1")
+V_3_3_2 = KafkaVersion("3.3.2")
+LATEST_3_3 = V_3_3_2
+
+# 3.4.x versions
+V_3_4_0 = KafkaVersion("3.4.0")
+V_3_4_1 = KafkaVersion("3.4.1")
+LATEST_3_4 = V_3_4_1
+
+# 3.5.x versions
+V_3_5_0 = KafkaVersion("3.5.0")
+V_3_5_1 = KafkaVersion("3.5.1")
+V_3_5_2 = KafkaVersion("3.5.2")
+LATEST_3_5 = V_3_5_2
+
+# 3.6.x versions
+V_3_6_0 = KafkaVersion("3.6.0")
+V_3_6_1 = KafkaVersion("3.6.1")
+V_3_6_2 = KafkaVersion("3.6.2")
+LATEST_3_6 = V_3_6_2
+
+# 3.7.x version
+V_3_7_0 = KafkaVersion("3.7.0")
+V_3_7_1 = KafkaVersion("3.7.1")
+V_3_7_2 = KafkaVersion("3.7.2")
+LATEST_3_7 = V_3_7_2
+
+# 3.8.x version
+V_3_8_0 = KafkaVersion("3.8.0")
+V_3_8_1 = KafkaVersion("3.8.1")
+LATEST_3_8 = V_3_8_1
+
+# 3.9.x version
+V_3_9_0 = KafkaVersion("3.9.0")
+V_3_9_1 = KafkaVersion("3.9.1")
+V_3_9_2 = KafkaVersion("3.9.2")
+LATEST_3_9 = V_3_9_2
+
+# 4.0.x version
+V_4_0_0 = KafkaVersion("4.0.0")
+V_4_0_1 = KafkaVersion("4.0.1")
+LATEST_4_0 = V_4_0_1
+
+# 4.1.x version
+V_4_1_0 = KafkaVersion("4.1.0")
+V_4_1_1 = KafkaVersion("4.1.1")
+V_4_1_2 = KafkaVersion("4.1.2")
+LATEST_4_1 = V_4_1_2
+
+# 4.2.x version
+V_4_2_0 = KafkaVersion("4.2.0")
+V_4_2_1 = KafkaVersion("4.2.1")
+V_4_2_2 = KafkaVersion("4.2.2")
+LATEST_4_2 = V_4_2_2
+
+# 4.3.x version
+V_4_3_0 = KafkaVersion("4.3.0")
+V_4_3_1 = KafkaVersion("4.3.1")
+LATEST_4_3 = V_4_3_1
+
+# 4.4.x version
+V_4_4_0 = KafkaVersion("4.4.0")
+LATEST_4_4 = V_4_4_0

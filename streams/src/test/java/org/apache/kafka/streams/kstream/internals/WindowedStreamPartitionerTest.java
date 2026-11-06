@@ -16,31 +16,39 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
-import org.apache.kafka.clients.producer.internals.DefaultPartitioner;
+import org.apache.kafka.clients.producer.internals.BuiltInPartitioner;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
+import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.serialization.IntegerSerializer;
-import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.streams.kstream.TimeWindowedSerializer;
 import org.apache.kafka.streams.kstream.Windowed;
-import org.junit.Test;
+
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Random;
+import java.util.Set;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 public class WindowedStreamPartitionerTest {
 
-    private String topicName = "topic";
+    private final String topicName = "topic";
 
-    private IntegerSerializer intSerializer = new IntegerSerializer();
-    private StringSerializer stringSerializer = new StringSerializer();
+    private final IntegerSerializer intSerializer = new IntegerSerializer();
 
-    private List<PartitionInfo> infos = Arrays.asList(
+    private final List<PartitionInfo> infos = Arrays.asList(
             new PartitionInfo(topicName, 0, Node.noNode(), new Node[0], new Node[0]),
             new PartitionInfo(topicName, 1, Node.noNode(), new Node[0], new Node[0]),
             new PartitionInfo(topicName, 2, Node.noNode(), new Node[0], new Node[0]),
@@ -49,35 +57,41 @@ public class WindowedStreamPartitionerTest {
             new PartitionInfo(topicName, 5, Node.noNode(), new Node[0], new Node[0])
     );
 
-    private Cluster cluster = new Cluster("cluster", Collections.singletonList(Node.noNode()), infos,
-            Collections.<String>emptySet(), Collections.<String>emptySet());
+    private final Cluster cluster = new Cluster("cluster", Collections.singletonList(Node.noNode()), infos,
+            Collections.emptySet(), Collections.emptySet());
 
     @Test
-    public void testCopartitioning() {
-        final Random rand = new Random();
-        final DefaultPartitioner defaultPartitioner = new DefaultPartitioner();
+    public void shouldThrowUnsupportedOperationExceptionForDeprecatedMethod() {
         final WindowedSerializer<Integer> timeWindowedSerializer = new TimeWindowedSerializer<>(intSerializer);
         final WindowedStreamPartitioner<Integer, String> streamPartitioner = new WindowedStreamPartitioner<>(timeWindowedSerializer);
+        final Windowed<Integer> windowedKey = new Windowed<>(1, new TimeWindow(10, 20));
 
-        for (int k = 0; k < 10; k++) {
-            Integer key = rand.nextInt();
-            byte[] keyBytes = intSerializer.serialize(topicName, key);
+        assertThrows(UnsupportedOperationException.class, () -> streamPartitioner.partitions(topicName, windowedKey, "value", infos.size()));
+    }
 
-            String value = key.toString();
-            byte[] valueBytes = stringSerializer.serialize(topicName, value);
+    @Test
+    public void testCopartitioningWithHeaders() {
+        final Random rand = new Random();
+        final Headers headers = new RecordHeaders();
+        headers.add("key", "value".getBytes());
 
-            Integer expected = defaultPartitioner.partition("topic", key, keyBytes, value, valueBytes, cluster);
+        @SuppressWarnings("unchecked")
+        final WindowedSerializer<Integer> mockSerializer = mock(WindowedSerializer.class);
+        final WindowedStreamPartitioner<Integer, String> streamPartitioner = new WindowedStreamPartitioner<>(mockSerializer);
 
-            for (int w = 1; w < 10; w++) {
-                TimeWindow window = new TimeWindow(10 * w, 20 * w);
+        final Integer key = rand.nextInt();
+        final String value = key.toString();
+        final TimeWindow window = new TimeWindow(10, 20);
+        final Windowed<Integer> windowedKey = new Windowed<>(key, window);
+        final byte[] keyBytes = intSerializer.serialize(topicName, key);
+        final Set<Integer> expected = Set.of(BuiltInPartitioner.partitionForKey(keyBytes, cluster.partitionsForTopic(topicName).size()));
 
-                Windowed<Integer> windowedKey = new Windowed<>(key, window);
-                Integer actual = streamPartitioner.partition(topicName, windowedKey, value, infos.size());
+        when(mockSerializer.serializeBaseKey(topicName, headers, windowedKey)).thenReturn(keyBytes);
 
-                assertEquals(expected, actual);
-            }
-        }
+        final Optional<Set<Integer>> actual = streamPartitioner.partitions(topicName, windowedKey, value, headers, infos.size());
 
-        defaultPartitioner.close();
+        assertTrue(actual.isPresent());
+        assertEquals(expected, actual.get());
+        verify(mockSerializer).serializeBaseKey(topicName, headers, windowedKey);
     }
 }

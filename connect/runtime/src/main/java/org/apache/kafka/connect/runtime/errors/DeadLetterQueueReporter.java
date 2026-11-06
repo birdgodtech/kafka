@@ -16,18 +16,19 @@
  */
 package org.apache.kafka.connect.runtime.errors;
 
-import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.header.Headers;
-import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.runtime.SinkConnectorConfig;
-import org.apache.kafka.connect.runtime.WorkerConfig;
 import org.apache.kafka.connect.util.ConnectorTaskId;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,9 +37,11 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-
-import static java.util.Collections.singleton;
+import java.util.concurrent.Future;
 
 /**
  * Write the original consumed record into a dead letter queue. The dead letter queue is a Kafka topic located
@@ -46,7 +49,7 @@ import static java.util.Collections.singleton;
  * with its own Kafka topic dead letter queue. By default, the topic name is not set, and if the
  * connector config doesn't specify one, this feature is disabled.
  */
-public class DeadLetterQueueReporter implements ErrorReporter {
+public class DeadLetterQueueReporter implements ErrorReporter<ConsumerRecord<byte[], byte[]>> {
 
     private static final Logger log = LoggerFactory.getLogger(DeadLetterQueueReporter.class);
 
@@ -66,20 +69,22 @@ public class DeadLetterQueueReporter implements ErrorReporter {
 
     private final SinkConnectorConfig connConfig;
     private final ConnectorTaskId connectorTaskId;
+    private final ErrorHandlingMetrics errorHandlingMetrics;
+    private final String dlqTopicName;
 
-    private KafkaProducer<byte[], byte[]> kafkaProducer;
-    private ErrorHandlingMetrics errorHandlingMetrics;
+    private final KafkaProducer<byte[], byte[]> kafkaProducer;
 
-    public static DeadLetterQueueReporter createAndSetup(WorkerConfig workerConfig,
+    public static DeadLetterQueueReporter createAndSetup(Map<String, Object> adminProps,
                                                          ConnectorTaskId id,
-                                                         SinkConnectorConfig sinkConfig, Map<String, Object> producerProps) {
+                                                         SinkConnectorConfig sinkConfig, Map<String, Object> producerProps,
+                                                         ErrorHandlingMetrics errorHandlingMetrics) {
         String topic = sinkConfig.dlqTopicName();
 
-        try (AdminClient admin = AdminClient.create(workerConfig.originals())) {
+        try (Admin admin = Admin.create(adminProps)) {
             if (!admin.listTopics().names().get().contains(topic)) {
                 log.error("Topic {} doesn't exist. Will attempt to create topic.", topic);
                 NewTopic schemaTopicRequest = new NewTopic(topic, DLQ_NUM_DESIRED_PARTITIONS, sinkConfig.dlqTopicReplicationFactor());
-                admin.createTopics(singleton(schemaTopicRequest)).all().get();
+                admin.createTopics(Set.of(schemaTopicRequest)).all().get();
             }
         } catch (InterruptedException e) {
             throw new ConnectException("Could not initialize dead letter queue with topic=" + topic, e);
@@ -90,7 +95,7 @@ public class DeadLetterQueueReporter implements ErrorReporter {
         }
 
         KafkaProducer<byte[], byte[]> dlqProducer = new KafkaProducer<>(producerProps);
-        return new DeadLetterQueueReporter(dlqProducer, sinkConfig, id);
+        return new DeadLetterQueueReporter(dlqProducer, sinkConfig, id, errorHandlingMetrics);
     }
 
     /**
@@ -99,35 +104,37 @@ public class DeadLetterQueueReporter implements ErrorReporter {
      * @param kafkaProducer a Kafka Producer to produce the original consumed records.
      */
     // Visible for testing
-    DeadLetterQueueReporter(KafkaProducer<byte[], byte[]> kafkaProducer, SinkConnectorConfig connConfig, ConnectorTaskId id) {
+    DeadLetterQueueReporter(KafkaProducer<byte[], byte[]> kafkaProducer, SinkConnectorConfig connConfig,
+                            ConnectorTaskId id, ErrorHandlingMetrics errorHandlingMetrics) {
+        Objects.requireNonNull(kafkaProducer);
+        Objects.requireNonNull(connConfig);
+        Objects.requireNonNull(id);
+        Objects.requireNonNull(errorHandlingMetrics);
+
         this.kafkaProducer = kafkaProducer;
         this.connConfig = connConfig;
         this.connectorTaskId = id;
-    }
-
-    @Override
-    public void metrics(ErrorHandlingMetrics errorHandlingMetrics) {
         this.errorHandlingMetrics = errorHandlingMetrics;
+        this.dlqTopicName = connConfig.dlqTopicName().trim();
     }
 
     /**
-     * Write the raw records into a Kafka topic.
+     * Write the raw records into a Kafka topic and return the producer future.
      *
-     * @param context processing context containing the raw record at {@link ProcessingContext#consumerRecord()}.
+     * @param context processing context containing the raw record at {@link ProcessingContext#original()}.
+     * @return the future associated with the writing of this record; never null
      */
-    public void report(ProcessingContext context) {
-        final String dlqTopicName = connConfig.dlqTopicName();
+    public Future<RecordMetadata> report(ProcessingContext<ConsumerRecord<byte[], byte[]>> context) {
         if (dlqTopicName.isEmpty()) {
-            return;
+            return CompletableFuture.completedFuture(null);
         }
-
         errorHandlingMetrics.recordDeadLetterQueueProduceRequest();
 
-        ConsumerRecord<byte[], byte[]> originalMessage = context.consumerRecord();
-        if (originalMessage == null) {
+        if (context.original() == null) {
             errorHandlingMetrics.recordDeadLetterQueueProduceFailed();
-            return;
+            return CompletableFuture.completedFuture(null);
         }
+        ConsumerRecord<byte[], byte[]> originalMessage = context.original();
 
         ProducerRecord<byte[], byte[]> producerRecord;
         if (originalMessage.timestamp() == RecordBatch.NO_TIMESTAMP) {
@@ -142,21 +149,21 @@ public class DeadLetterQueueReporter implements ErrorReporter {
             populateContextHeaders(producerRecord, context);
         }
 
-        this.kafkaProducer.send(producerRecord, (metadata, exception) -> {
+        return this.kafkaProducer.send(producerRecord, (metadata, exception) -> {
             if (exception != null) {
-                log.error("Could not produce message to dead letter queue. topic=" + dlqTopicName, exception);
+                log.error("Could not produce message to dead letter queue. topic={}", dlqTopicName, exception);
                 errorHandlingMetrics.recordDeadLetterQueueProduceFailed();
             }
         });
     }
 
     // Visible for testing
-    void populateContextHeaders(ProducerRecord<byte[], byte[]> producerRecord, ProcessingContext context) {
+    void populateContextHeaders(ProducerRecord<byte[], byte[]> producerRecord, ProcessingContext<ConsumerRecord<byte[], byte[]>> context) {
         Headers headers = producerRecord.headers();
-        if (context.consumerRecord() != null) {
-            headers.add(ERROR_HEADER_ORIG_TOPIC, toBytes(context.consumerRecord().topic()));
-            headers.add(ERROR_HEADER_ORIG_PARTITION, toBytes(context.consumerRecord().partition()));
-            headers.add(ERROR_HEADER_ORIG_OFFSET, toBytes(context.consumerRecord().offset()));
+        if (context.original() != null) {
+            headers.add(ERROR_HEADER_ORIG_TOPIC, toBytes(context.original().topic()));
+            headers.add(ERROR_HEADER_ORIG_PARTITION, toBytes(context.original().partition()));
+            headers.add(ERROR_HEADER_ORIG_OFFSET, toBytes(context.original().offset()));
         }
 
         headers.add(ERROR_HEADER_CONNECTOR_NAME, toBytes(connectorTaskId.connector()));
@@ -176,7 +183,7 @@ public class DeadLetterQueueReporter implements ErrorReporter {
     private byte[] stacktrace(Throwable error) {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         try {
-            PrintStream stream = new PrintStream(bos, true, "UTF-8");
+            PrintStream stream = new PrintStream(bos, true, StandardCharsets.UTF_8);
             error.printStackTrace(stream);
             bos.close();
             return bos.toByteArray();
@@ -195,6 +202,15 @@ public class DeadLetterQueueReporter implements ErrorReporter {
     }
 
     private byte[] toBytes(String value) {
-        return value.getBytes(StandardCharsets.UTF_8);
+        if (value != null) {
+            return value.getBytes(StandardCharsets.UTF_8);
+        } else {
+            return null;
+        }
+    }
+
+    @Override
+    public void close() {
+        kafkaProducer.close();
     }
 }

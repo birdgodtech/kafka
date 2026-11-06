@@ -16,77 +16,86 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.GroupType;
+import org.apache.kafka.common.internals.UnsupportedProtocolFieldException;
+import org.apache.kafka.common.message.ListGroupsRequestData;
+import org.apache.kafka.common.message.ListGroupsResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.Schema;
-import org.apache.kafka.common.protocol.types.Struct;
+import org.apache.kafka.common.protocol.Readable;
 
-import java.nio.ByteBuffer;
-import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
 
+/**
+ * Possible error codes:
+ *
+ * COORDINATOR_LOAD_IN_PROGRESS (14)
+ * COORDINATOR_NOT_AVAILABLE (15)
+ * AUTHORIZATION_FAILED (29)
+ */
 public class ListGroupsRequest extends AbstractRequest {
 
-    /* List groups api */
-    private static final Schema LIST_GROUPS_REQUEST_V0 = new Schema();
-
-    /* v1 request is the same as v0. Throttle time has been added to response */
-    private static final Schema LIST_GROUPS_REQUEST_V1 = LIST_GROUPS_REQUEST_V0;
-
-    /**
-     * The version number is bumped to indicate that on quota violation brokers send out responses before throttling.
-     */
-    private static final Schema LIST_GROUPS_REQUEST_V2 = LIST_GROUPS_REQUEST_V1;
-
-    public static Schema[] schemaVersions() {
-        return new Schema[] {LIST_GROUPS_REQUEST_V0, LIST_GROUPS_REQUEST_V1,
-            LIST_GROUPS_REQUEST_V2};
-    }
-
     public static class Builder extends AbstractRequest.Builder<ListGroupsRequest> {
-        public Builder() {
+
+        private final ListGroupsRequestData data;
+
+        public Builder(ListGroupsRequestData data) {
             super(ApiKeys.LIST_GROUPS);
+            this.data = data;
         }
 
         @Override
         public ListGroupsRequest build(short version) {
-            return new ListGroupsRequest(version);
+            if (!data.statesFilter().isEmpty() && version < 4) {
+                throw new UnsupportedProtocolFieldException("StatesFilter", apiKey().name(), version, 4);
+            }
+            if (!data.typesFilter().isEmpty() && version < 5) {
+                // Types filter is supported by brokers with version 3.8.0 or later. Older brokers only support
+                // classic groups, so listing consumer groups on an older broker does not need to use a types filter.
+                // If the types filter is only for consumer and classic, or just classic groups, it can be safely omitted.
+                // This allows a modern admin client to list consumer groups on older brokers in a straightforward way.
+                HashSet<String> typesCopy = new HashSet<>(data.typesFilter());
+                boolean containedClassic = typesCopy.remove(GroupType.CLASSIC.toString());
+                boolean containedConsumer = typesCopy.remove(GroupType.CONSUMER.toString());
+                if (!typesCopy.isEmpty() || (!containedClassic && containedConsumer)) {
+                    throw new UnsupportedProtocolFieldException(String.join(",", data.typesFilter()), apiKey().name(), version, 5);
+                }
+                return new ListGroupsRequest(data.duplicate().setTypesFilter(List.of()), version);
+            }
+            return new ListGroupsRequest(data, version);
         }
 
         @Override
         public String toString() {
-            return "(type=ListGroupsRequest)";
+            return data.toString();
         }
     }
 
-    public ListGroupsRequest(short version) {
-        super(version);
-    }
+    private final ListGroupsRequestData data;
 
-    public ListGroupsRequest(Struct struct, short versionId) {
-        super(versionId);
+    public ListGroupsRequest(ListGroupsRequestData data, short version) {
+        super(ApiKeys.LIST_GROUPS, version);
+        this.data = data;
     }
 
     @Override
     public ListGroupsResponse getErrorResponse(int throttleTimeMs, Throwable e) {
-        short versionId = version();
-        switch (versionId) {
-            case 0:
-                return new ListGroupsResponse(Errors.forException(e), Collections.<ListGroupsResponse.Group>emptyList());
-            case 1:
-            case 2:
-                return new ListGroupsResponse(throttleTimeMs, Errors.forException(e), Collections.<ListGroupsResponse.Group>emptyList());
-            default:
-                throw new IllegalArgumentException(String.format("Version %d is not valid. Valid versions for %s are 0 to %d",
-                        versionId, this.getClass().getSimpleName(), ApiKeys.LIST_GROUPS.latestVersion()));
+        ListGroupsResponseData listGroupsResponseData = new ListGroupsResponseData().
+            setGroups(List.of()).
+            setErrorCode(Errors.forException(e).code());
+        if (version() >= 1) {
+            listGroupsResponseData.setThrottleTimeMs(throttleTimeMs);
         }
+        return new ListGroupsResponse(listGroupsResponseData);
     }
 
-    public static ListGroupsRequest parse(ByteBuffer buffer, short version) {
-        return new ListGroupsRequest(ApiKeys.LIST_GROUPS.parseRequest(version, buffer), version);
+    public static ListGroupsRequest parse(Readable readable, short version) {
+        return new ListGroupsRequest(new ListGroupsRequestData(readable, version), version);
     }
 
     @Override
-    protected Struct toStruct() {
-        return new Struct(ApiKeys.LIST_GROUPS.requestSchema(version()));
+    public ListGroupsRequestData data() {
+        return data;
     }
 }

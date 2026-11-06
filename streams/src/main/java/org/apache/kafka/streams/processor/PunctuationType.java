@@ -14,10 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.streams.processor;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
+import java.time.Duration;
+
 /**
- * Controls what notion of time is used for punctuation scheduled via {@link ProcessorContext#schedule(long, PunctuationType, Punctuator)} schedule}:
+ * Controls what notion of time is used for punctuation scheduled via
+ * {@link org.apache.kafka.streams.processor.api.ProcessorContext#schedule(Duration, PunctuationType, Punctuator) schedule}:
  * <ul>
  *   <li>STREAM_TIME - uses "stream time", which is advanced by the processing of messages
  *   in accordance with the timestamp as extracted by the {@link TimestampExtractor} in use.
@@ -28,6 +34,7 @@ package org.apache.kafka.streams.processor;
  *   by how long an iteration of the processing loop takes to complete</li>
  * </ul>
  */
+@InterfaceAudience.Public
 public enum PunctuationType {
    STREAM_TIME,
    WALL_CLOCK_TIME,

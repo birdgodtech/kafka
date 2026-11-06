@@ -14,16 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.serialization;
 
-import java.util.Map;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
+@InterfaceAudience.Public
 public class IntegerSerializer implements Serializer<Integer> {
-
-    public void configure(Map<String, ?> configs, boolean isKey) {
-        // nothing to do
-    }
-
     public byte[] serialize(String topic, Integer data) {
         if (data == null)
             return null;
@@ -34,9 +31,5 @@ public class IntegerSerializer implements Serializer<Integer> {
             (byte) (data >>> 8),
             data.byteValue()
         };
-    }
-
-    public void close() {
-        // nothing to do
     }
 }

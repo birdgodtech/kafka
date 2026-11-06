@@ -1,0 +1,201 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.streams.processor.internals;
+
+import org.apache.kafka.common.errors.SerializationException;
+
+import org.junit.jupiter.api.Test;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+public class ProcessorMetadataTest {
+
+    @Test
+    public void shouldAddAndGetKeyValueWithEmptyConstructor() {
+        final ProcessorMetadata metadata = new ProcessorMetadata();
+        final String key = "some_key";
+        final long value = 100L;
+
+        metadata.put(key, value);
+        final Long actualValue =  metadata.get(key);
+
+        assertEquals(value, actualValue);
+
+        final Long noValue = metadata.get("no_key");
+        assertNull(noValue);
+    }
+
+    @Test
+    public void shouldAddAndGetKeyValueWithExistingMeta() {
+        final Map<String, Long> map = new HashMap<>();
+        map.put("key1", 1L);
+        map.put("key2", 2L);
+
+        final ProcessorMetadata metadata = new ProcessorMetadata(map);
+
+        final long value1 = metadata.get("key1");
+        assertEquals(1L, value1);
+
+        final long value2 = metadata.get("key2");
+        assertEquals(2L, value2);
+
+        final Long noValue = metadata.get("key3");
+        assertNull(noValue);
+
+        metadata.put("key3", 3L);
+        final long value3 = metadata.get("key3");
+        assertEquals(3L, value3);
+    }
+
+    @Test
+    public void shouldSerializeAndDeserialize() {
+        final ProcessorMetadata metadata = new ProcessorMetadata();
+        final String key1 = "key1", key2 = "key2", key3 = "key3";
+        final long value1 = 1L, value2 = 2L, value3 = 3L;
+
+        metadata.put(key1, value1);
+        metadata.put(key2, value2);
+        metadata.put(key3, value3);
+
+        final byte[] serialized = metadata.serialize();
+        final ProcessorMetadata deserialized = ProcessorMetadata.deserialize(serialized);
+
+        assertEquals(value1, deserialized.get(key1));
+        assertEquals(value2, deserialized.get(key2));
+        assertEquals(value3, deserialized.get(key3));
+    }
+
+    @Test
+    public void shouldDeserializeNull() {
+        final ProcessorMetadata deserialized = ProcessorMetadata.deserialize(null);
+        assertEquals(new ProcessorMetadata(), deserialized);
+    }
+
+    @Test
+    public void shouldUpdate() {
+        final ProcessorMetadata emptyMeta = new ProcessorMetadata();
+        emptyMeta.update(null);
+
+        assertEquals(new ProcessorMetadata(), emptyMeta);
+
+        {
+            final Map<String, Long> map1 = new HashMap<>();
+            map1.put("key1", 1L);
+            map1.put("key2", 2L);
+            final ProcessorMetadata metadata1 = new ProcessorMetadata(map1);
+            emptyMeta.update(metadata1);
+            assertEquals(1L, emptyMeta.get("key1"));
+            assertEquals(2L, emptyMeta.get("key2"));
+        }
+
+        {
+            final Map<String, Long> map1 = new HashMap<>();
+            map1.put("key1", 0L);
+            map1.put("key2", 1L);
+            final ProcessorMetadata metadata1 = new ProcessorMetadata(map1);
+            emptyMeta.update(metadata1);
+            assertEquals(1L, emptyMeta.get("key1"));
+            assertEquals(2L, emptyMeta.get("key2"));
+        }
+
+        {
+            final Map<String, Long> map1 = new HashMap<>();
+            map1.put("key1", 2L);
+            map1.put("key2", 3L);
+            final ProcessorMetadata metadata1 = new ProcessorMetadata(map1);
+            emptyMeta.update(metadata1);
+            assertEquals(2L, emptyMeta.get("key1"));
+            assertEquals(3L, emptyMeta.get("key2"));
+        }
+    }
+
+    @Test
+    public void shouldUpdateCommitFlag() {
+        final ProcessorMetadata emptyMeta = new ProcessorMetadata();
+        assertFalse(emptyMeta.needsCommit());
+
+        emptyMeta.setNeedsCommit(true);
+        assertTrue(emptyMeta.needsCommit());
+
+        emptyMeta.setNeedsCommit(false);
+        assertFalse(emptyMeta.needsCommit());
+
+        emptyMeta.put("key1", 1L);
+        assertTrue(emptyMeta.needsCommit());
+
+        final Map<String, Long> map1 = new HashMap<>();
+        map1.put("key1", 2L);
+        map1.put("key2", 3L);
+        final ProcessorMetadata metadata1 = new ProcessorMetadata(map1);
+        emptyMeta.update(metadata1);
+        assertTrue(emptyMeta.needsCommit());
+    }
+
+    @Test
+    public void shouldNotUseCommitFlagForHashcodeAndEquals() {
+        final ProcessorMetadata metadata1 = new ProcessorMetadata();
+        metadata1.setNeedsCommit(true);
+        final ProcessorMetadata metadata2 = new ProcessorMetadata();
+        metadata2.setNeedsCommit(false);
+
+        assertEquals(metadata1, metadata2);
+        assertEquals(metadata1.hashCode(), metadata2.hashCode());
+    }
+
+    @Test
+    public void shouldThrowWhenKeySizeExceedsRemainingBytes() {
+        final byte[] keyBytes = "key1".getBytes(StandardCharsets.UTF_8);
+        final int fakeKeySize = keyBytes.length + Long.BYTES + 1; // one past what's actually left for this entry
+
+        final ByteBuffer buf = ByteBuffer.allocate(Integer.BYTES + Integer.BYTES + keyBytes.length + Long.BYTES);
+        buf.putInt(1);              // entrySize = 1, legitimate
+        buf.putInt(fakeKeySize);    // keySize is too large
+        buf.put(keyBytes);
+        buf.putLong(1L);
+        final byte[] serialized = new byte[buf.position()];
+        buf.position(0);
+        buf.get(serialized);
+
+        assertThrows(SerializationException.class, () -> ProcessorMetadata.deserialize(serialized));
+    }
+
+    @Test
+    public void shouldThrowWhenEntrySizeExceedsRemainingBytes() {
+        final byte[] keyBytes = "k".getBytes(StandardCharsets.UTF_8);
+        final int fakeEntrySize = 2; // claims 2 entries, but only enough real bytes exist for 1
+
+        final ByteBuffer buf = ByteBuffer.allocate(Integer.BYTES + Integer.BYTES + keyBytes.length + Long.BYTES);
+        buf.putInt(fakeEntrySize);    // entrySize too large
+        buf.putInt(keyBytes.length);  // keySize for the one real entry that follows
+        buf.put(keyBytes);
+        buf.putLong(1L);
+        final byte[] serialized = new byte[buf.position()];
+        buf.position(0);
+        buf.get(serialized);
+
+        assertThrows(SerializationException.class, () -> ProcessorMetadata.deserialize(serialized));
+    }
+}

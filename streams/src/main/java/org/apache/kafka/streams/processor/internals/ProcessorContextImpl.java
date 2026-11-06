@@ -16,6 +16,10 @@
  */
 package org.apache.kafka.streams.processor.internals;
 
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeader;
+import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.processor.Cancellable;
@@ -24,33 +28,89 @@ import org.apache.kafka.streams.processor.Punctuator;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.To;
+import org.apache.kafka.streams.processor.api.FixedKeyRecord;
+import org.apache.kafka.streams.processor.api.Record;
+import org.apache.kafka.streams.processor.internals.Task.TaskType;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
+import org.apache.kafka.streams.query.Position;
+import org.apache.kafka.streams.state.internals.PositionSerde;
 import org.apache.kafka.streams.state.internals.ThreadCache;
+import org.apache.kafka.streams.state.internals.ThreadCache.DirtyEntryFlushListener;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
-public class ProcessorContextImpl extends AbstractProcessorContext implements RecordCollector.Supplier {
+import static org.apache.kafka.streams.StreamsConfig.InternalConfig.IQ_CONSISTENCY_OFFSET_VECTOR_ENABLED;
+import static org.apache.kafka.streams.internals.ApiUtils.prepareMillisCheckFailMsgPrefix;
+import static org.apache.kafka.streams.internals.ApiUtils.validateMillisecondDuration;
+import static org.apache.kafka.streams.processor.internals.AbstractReadOnlyDecorator.getReadOnlyStore;
+import static org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator.wrapWithReadWriteStore;
 
-    private final StreamTask task;
-    private final RecordCollector collector;
-    private TimestampSupplier streamTimeSupplier;
-    private final ToInternal toInternal = new ToInternal();
-    private final static To SEND_TO_ALL = To.all();
+public final class ProcessorContextImpl extends AbstractProcessorContext<Object, Object> implements RecordCollector.Supplier {
+    // the below are null for standby tasks
+    private StreamTask streamTask;
+    private RecordCollector collector;
 
-    ProcessorContextImpl(final TaskId id,
-                         final StreamTask task,
-                         final StreamsConfig config,
-                         final RecordCollector collector,
-                         final ProcessorStateManager stateMgr,
-                         final StreamsMetricsImpl metrics,
-                         final ThreadCache cache) {
-        super(id, config, metrics, stateMgr, cache);
-        this.task = task;
-        this.collector = collector;
+    private final ProcessorStateManager stateManager;
+    private final boolean consistencyEnabled;
+
+    final Map<String, DirtyEntryFlushListener> cacheNameToFlushListener = new HashMap<>();
+
+    public ProcessorContextImpl(final TaskId id,
+                                final StreamsConfig config,
+                                final ProcessorStateManager stateMgr,
+                                final StreamsMetricsImpl metrics,
+                                final ThreadCache cache) {
+        super(id, config, metrics, cache);
+        stateManager = stateMgr;
+        consistencyEnabled = StreamsConfig.InternalConfig.getBoolean(
+                appConfigs(),
+                IQ_CONSISTENCY_OFFSET_VECTOR_ENABLED,
+                false);
     }
 
-    public ProcessorStateManager getStateMgr() {
-        return (ProcessorStateManager) stateManager;
+    @Override
+    public void transitionToActive(final StreamTask streamTask, final RecordCollector recordCollector, final ThreadCache newCache) {
+        if (stateManager.taskType() != TaskType.ACTIVE) {
+            throw new IllegalStateException("Tried to transition processor context to active but the state manager's " +
+                                                "type was " + stateManager.taskType());
+        }
+        this.streamTask = streamTask;
+        this.collector = recordCollector;
+        this.cache = newCache;
+        addAllFlushListenersToNewCache();
+    }
+
+    @Override
+    public void transitionToStandby(final ThreadCache newCache) {
+        if (stateManager.taskType() != TaskType.STANDBY) {
+            throw new IllegalStateException("Tried to transition processor context to standby but the state manager's " +
+                                                "type was " + stateManager.taskType());
+        }
+        this.streamTask = null;
+        this.collector = null;
+        this.cache = newCache;
+        addAllFlushListenersToNewCache();
+    }
+
+    @Override
+    public void registerCacheFlushListener(final String namespace, final DirtyEntryFlushListener listener) {
+        cacheNameToFlushListener.put(namespace, listener);
+        cache.addDirtyEntryFlushListener(namespace, listener);
+    }
+
+    private void addAllFlushListenersToNewCache() {
+        for (final Map.Entry<String, DirtyEntryFlushListener> cacheEntry : cacheNameToFlushListener.entrySet()) {
+            cache.addDirtyEntryFlushListener(cacheEntry.getKey(), cacheEntry.getValue());
+        }
+    }
+
+    @Override
+    public ProcessorStateManager stateManager() {
+        return stateManager;
     }
 
     @Override
@@ -58,109 +118,272 @@ public class ProcessorContextImpl extends AbstractProcessorContext implements Re
         return collector;
     }
 
+    @Override
+    public void logChange(final String storeName,
+                          final Bytes key,
+                          final byte[] value,
+                          final long timestamp,
+                          final Headers headers,
+                          final Position position) {
+        throwUnsupportedOperationExceptionIfStandby("logChange");
+
+        final TopicPartition changelogPartition = stateManager().registeredChangelogPartitionFor(storeName);
+
+        if (consistencyEnabled) {
+            addVectorClockToHeaders(headers, position);
+        }
+
+        collector.send(
+            changelogPartition.topic(),
+            key,
+            value,
+            headers,
+            changelogPartition.partition(),
+            timestamp,
+            BYTES_KEY_SERIALIZER,
+            BYTEARRAY_VALUE_SERIALIZER,
+            null,
+            null);
+    }
+
+    private void addVectorClockToHeaders(final Headers headers, final Position position) {
+        headers.add(ChangelogRecordDeserializationHelper.CHANGELOG_VERSION_HEADER_RECORD_CONSISTENCY);
+        headers.add(new RecordHeader(ChangelogRecordDeserializationHelper.CHANGELOG_POSITION_HEADER_KEY,
+            PositionSerde.serialize(position).array()));
+    }
+
     /**
      * @throws StreamsException if an attempt is made to access this state store from an unknown node
+     * @throws UnsupportedOperationException if the current streamTask type is standby
      */
+    @SuppressWarnings("unchecked")
     @Override
-    public StateStore getStateStore(final String name) {
+    public <S extends StateStore> S  getStateStore(final String name) {
+        throwUnsupportedOperationExceptionIfStandby("getStateStore");
         if (currentNode() == null) {
             throw new StreamsException("Accessing from an unknown node");
         }
 
-        final StateStore global = stateManager.getGlobalStore(name);
-        if (global != null) {
-            return global;
+        final StateStore globalStore = stateManager.globalStore(name);
+        if (globalStore != null) {
+            return (S) getReadOnlyStore(globalStore);
         }
 
         if (!currentNode().stateStores.contains(name)) {
             throw new StreamsException("Processor " + currentNode().name() + " has no access to StateStore " + name +
-                    " as the store is not connected to the processor. If you add stores manually via '.addStateStore()' " +
-                    "make sure to connect the added store to the processor by providing the processor name to " +
-                    "'.addStateStore()' or connect them via '.connectProcessorAndStateStores()'. " +
-                    "DSL users need to provide the store name to '.process()', '.transform()', or '.transformValues()' " +
-                    "to connect the store to the corresponding operator. If you do not add stores manually, " +
-                    "please file a bug report at https://issues.apache.org/jira/projects/KAFKA.");
+                " as the store is not connected to the processor. If you add stores manually via '.addStateStore()' " +
+                "make sure to connect the added store to the processor by providing the processor name to " +
+                "'.addStateStore()' or connect them via '.connectProcessorAndStateStores()'. " +
+                "DSL users need to provide the store name to '.process()', '.processValues()', or '.transformValues()' " +
+                "to connect the store to the corresponding operator, or they can provide a StoreBuilder by implementing " +
+                "the stores() method on the Supplier itself. If you do not add stores manually, " +
+                "please file a bug report at https://issues.apache.org/jira/projects/KAFKA.");
         }
 
-        return stateManager.getStore(name);
+        final StateStore store = stateManager.store(name);
+        return (S) wrapWithReadWriteStore(store);
+    }
+
+    @Override
+    public <K, V> void forward(final K key,
+                               final V value) {
+        final Record<K, V> toForward = new Record<>(
+            key,
+            value,
+            recordContext.timestamp(),
+            headers()
+        );
+        forward(toForward);
+    }
+
+    @Override
+    public <K, V> void forward(final K key,
+                               final V value,
+                               final To to) {
+        final ToInternal toInternal = new ToInternal(to);
+        final Record<K, V> toForward = new Record<>(
+            key,
+            value,
+            toInternal.hasTimestamp() ? toInternal.timestamp() : recordContext.timestamp(),
+            headers()
+        );
+        forward(toForward, toInternal.child());
+    }
+
+    @Override
+    public <K, V> void forward(final FixedKeyRecord<K, V> record) {
+        forward(new Record<>(record.key(), record.value(), record.timestamp(), record.headers()));
+    }
+
+    @Override
+    public <K, V> void forward(final FixedKeyRecord<K, V> record, final String childName) {
+        forward(
+            new Record<>(record.key(), record.value(), record.timestamp(), record.headers()),
+            childName
+        );
+    }
+
+    @Override
+    public <K, V> void forward(final Record<K, V> record) {
+        forward(record, null);
     }
 
     @SuppressWarnings("unchecked")
     @Override
-    public <K, V> void forward(final K key, final V value) {
-        forward(key, value, SEND_TO_ALL);
-    }
+    public <K, V> void forward(final Record<K, V> record, final String childName) {
+        throwUnsupportedOperationExceptionIfStandby("forward");
 
-    @SuppressWarnings({"unchecked", "deprecation"})
-    @Override
-    public <K, V> void forward(final K key, final V value, final int childIndex) {
-        forward(key, value, To.child(((List<ProcessorNode>) currentNode().children()).get(childIndex).name()));
-    }
-
-    @SuppressWarnings({"unchecked", "deprecation"})
-    @Override
-    public <K, V> void forward(final K key, final V value, final String childName) {
-        forward(key, value, To.child(childName));
-    }
-
-    @SuppressWarnings("unchecked")
-    @Override
-    public <K, V> void forward(final K key, final V value, final To to) {
-        toInternal.update(to);
-        if (toInternal.hasTimestamp()) {
-            recordContext.setTimestamp(toInternal.timestamp());
+        final ProcessorNode<?, ?, ?, ?> previousNode = currentNode();
+        if (previousNode == null) {
+            throw new StreamsException("Current node is unknown. This can happen if 'forward()' is called " +
+                    "in an illegal scope. The root cause could be that a 'Processor' instance " +
+                    "is shared. To avoid this error, make sure that your suppliers return new instances " +
+                    "each time 'get()' of Supplier is called and do not return the same object reference " +
+                    "multiple times.");
         }
-        final ProcessorNode previousNode = currentNode();
+
+        final ProcessorRecordContext previousContext = recordContext;
+
         try {
-            final List<ProcessorNode<K, V>> children = (List<ProcessorNode<K, V>>) currentNode().children();
-            final String sendTo = toInternal.child();
-            if (sendTo != null) {
-                final ProcessorNode child = currentNode().getChild(sendTo);
-                if (child == null) {
-                    throw new StreamsException("Unknown downstream node: " + sendTo + " either does not exist or is not" +
-                            " connected to this processor.");
-                }
-                forward(child, key, value);
-            } else {
-                if (children.size() == 1) {
-                    final ProcessorNode child = children.get(0);
-                    forward(child, key, value);
-                } else {
-                    for (final ProcessorNode child : children) {
-                        forward(child, key, value);
-                    }
-                }
+            // we don't want to set the recordContext if it's null, since that means that
+            // the context itself is undefined. this isn't perfect, since downstream
+            // old API processors wouldn't see the timestamps or headers of upstream
+            // new API processors. But then again, from the perspective of those old-API
+            // processors, even consulting the timestamp or headers when the record context
+            // is undefined is itself not well-defined. Plus, I don't think we need to worry
+            // too much about heterogeneous applications, in which the upstream processor is
+            // implementing the new API and the downstream one is implementing the old API.
+            // So, this seems like a fine compromise for now.
+            if (recordContext != null && (record.timestamp() != recordContext.timestamp() || record.headers() != recordContext.headers())) {
+                recordContext = new ProcessorRecordContext(
+                    record.timestamp(),
+                    recordContext.offset(),
+                    recordContext.partition(),
+                    recordContext.topic(),
+                    record.headers(),
+                    recordContext.sourceRawKey(),
+                    recordContext.sourceRawValue()
+                );
             }
+
+            if (childName == null) {
+                final List<? extends ProcessorNode<?, ?, ?, ?>> children = currentNode().children();
+                for (final ProcessorNode<?, ?, ?, ?> child : children) {
+                    forwardInternal((ProcessorNode<K, V, ?, ?>) child, record);
+                }
+            } else {
+                final ProcessorNode<?, ?, ?, ?> child = currentNode().child(childName);
+                if (child == null) {
+                    throw new StreamsException("Unknown downstream node: " + childName
+                                                   + " either does not exist or is not connected to this processor.");
+                }
+                forwardInternal((ProcessorNode<K, V, ?, ?>) child, record);
+            }
+
         } finally {
+            recordContext = previousContext;
             setCurrentNode(previousNode);
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private <K, V> void forward(final ProcessorNode child,
-                                final K key,
-                                final V value) {
+    private <K, V> void forwardInternal(final ProcessorNode<K, V, ?, ?> child,
+                                        final Record<K, V> record) {
         setCurrentNode(child);
-        child.process(key, value);
+
+        child.process(record);
+
+        if (child.isTerminalNode()) {
+            streamTask.maybeAddTerminalE2ELatency(record.timestamp(), child.name());
+        }
     }
 
     @Override
     public void commit() {
-        task.needCommit();
+        throwUnsupportedOperationExceptionIfStandby("commit");
+        streamTask.requestCommit();
     }
 
     @Override
-    public Cancellable schedule(final long interval, final PunctuationType type, final Punctuator callback) {
-        return task.schedule(interval, type, callback);
-    }
+    public Cancellable schedule(final Duration interval,
+                                final PunctuationType type,
+                                final Punctuator callback) throws IllegalArgumentException {
+        throwUnsupportedOperationExceptionIfStandby("schedule");
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(interval, "interval");
+        final long intervalMs = validateMillisecondDuration(interval, msgPrefix);
+        if (intervalMs < 1) {
+            throw new IllegalArgumentException("The minimum supported scheduling interval is 1 millisecond.");
+        }
+        return streamTask.schedule(intervalMs, type, callback);    }
 
-    void setStreamTimeSupplier(final TimestampSupplier streamTimeSupplier) {
-        this.streamTimeSupplier = streamTimeSupplier;
+    @Override
+    public Cancellable schedule(
+            final Instant startTime,
+            final Duration interval,
+            final PunctuationType type,
+            final Punctuator callback) throws IllegalArgumentException {
+        throwUnsupportedOperationExceptionIfStandby("schedule");
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(interval, "interval");
+        final long intervalMs = validateMillisecondDuration(interval, msgPrefix);
+        if (intervalMs < 1) {
+            throw new IllegalArgumentException("The minimum supported scheduling interval is 1 millisecond.");
+        }
+        if (startTime.isBefore(Instant.EPOCH)) {
+            throw new IllegalArgumentException("The minimum supported start time is Instant.EPOCH.");
+        }
+        return streamTask.schedule(startTime, intervalMs, type, callback);
     }
 
     @Override
-    public long streamTime() {
-        return streamTimeSupplier.get();
+    public String topic() {
+        throwUnsupportedOperationExceptionIfStandby("topic");
+        return super.topic();
     }
 
+    @Override
+    public int partition() {
+        throwUnsupportedOperationExceptionIfStandby("partition");
+        return super.partition();
+    }
+
+    @Override
+    public long offset() {
+        throwUnsupportedOperationExceptionIfStandby("offset");
+        return super.offset();
+    }
+
+    @Override
+    public long timestamp() {
+        throwUnsupportedOperationExceptionIfStandby("timestamp");
+        return super.timestamp();
+    }
+
+    @Override
+    public long currentStreamTimeMs() {
+        return streamTask.streamTime();
+    }
+
+    @Override
+    public ProcessorNode<?, ?, ?, ?> currentNode() {
+        throwUnsupportedOperationExceptionIfStandby("currentNode");
+        return super.currentNode();
+    }
+
+    @Override
+    public void setRecordContext(final ProcessorRecordContext recordContext) {
+        throwUnsupportedOperationExceptionIfStandby("setRecordContext");
+        super.setRecordContext(recordContext);
+    }
+
+    @Override
+    public ProcessorRecordContext recordContext() {
+        throwUnsupportedOperationExceptionIfStandby("recordContext");
+        return super.recordContext();
+    }
+
+    private void throwUnsupportedOperationExceptionIfStandby(final String operationName) {
+        if (taskType() == TaskType.STANDBY) {
+            throw new UnsupportedOperationException(
+                "this should not happen: " + operationName + "() is not supported in standby tasks.");
+        }
+    }
 }

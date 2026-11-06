@@ -18,54 +18,58 @@ package org.apache.kafka.connect.util;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InvalidClassException;
 import java.io.ObjectInputStream;
 import java.io.ObjectStreamClass;
-import java.util.Collections;
-import java.util.HashSet;
+import java.util.Objects;
 import java.util.Set;
 
+
+/**
+ * Security note: While it seems it possible to build a deserialization gadget to obtain RCE via
+ * FileOffsetBackingStore, it requires having write permissions on the filesystem of the Connect worker.
+ * For that reason the Apache Kafka project does not consider this a security issue.
+ */
 public class SafeObjectInputStream extends ObjectInputStream {
 
-    protected static final Set<String> DEFAULT_NO_DESERIALIZE_CLASS_NAMES;
+    /**
+     * The exact class descriptors produced when deserializing {@code HashMap<byte[], byte[]>},
+     * the format written by {@link org.apache.kafka.connect.storage.FileOffsetBackingStore}.
+     * Verified by inspection: only {@code java.util.HashMap} and {@code [B} (byte[]) appear.
+     * Allowing any additional type would widen the attack surface without justification.
+     */
+    public static final Set<String> BASE_TYPES = Set.of(
+            "java.util.HashMap",
+            "[B"   // JVM descriptor for byte[]
+    );
 
-    static {
+    private final Set<String> allowedClasses;
 
-        Set<String> s = new HashSet<>();
-        s.add("org.apache.commons.collections.functors.InvokerTransformer");
-        s.add("org.apache.commons.collections.functors.InstantiateTransformer");
-        s.add("org.apache.commons.collections4.functors.InvokerTransformer");
-        s.add("org.apache.commons.collections4.functors.InstantiateTransformer");
-        s.add("org.codehaus.groovy.runtime.ConvertedClosure");
-        s.add("org.codehaus.groovy.runtime.MethodClosure");
-        s.add("org.springframework.beans.factory.ObjectFactory");
-        s.add("com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl");
-        s.add("org.apache.xalan.xsltc.trax.TemplatesImpl");
-        DEFAULT_NO_DESERIALIZE_CLASS_NAMES = Collections.unmodifiableSet(s);
+    /**
+     * Uses {@link #BASE_TYPES} as the allowlist. Suitable for {@code FileOffsetBackingStore}.
+     */
+    public SafeObjectInputStream(InputStream in) throws IOException {
+        this(in, BASE_TYPES);
     }
 
-
-    public SafeObjectInputStream(InputStream in) throws IOException {
+    /**
+     * Permits only the classes in {@code allowedClasses}. Use when the stream contains
+     * types beyond {@link #BASE_TYPES}; the caller must enumerate every expected type.
+     */
+    public SafeObjectInputStream(InputStream in, Set<String> allowedClasses) throws IOException {
         super(in);
+        this.allowedClasses = Objects.requireNonNull(allowedClasses, "allowedClasses");
     }
 
     @Override
     protected Class<?> resolveClass(ObjectStreamClass desc) throws IOException, ClassNotFoundException {
         String name = desc.getName();
-
-        if (isBlacklisted(name)) {
-            throw new SecurityException("Illegal type to deserialize: prevented for security reasons");
+        if (!allowedClasses.contains(name)) {
+            throw new InvalidClassException(name,
+                    "Rejected by deserialization allowlist. If this class is legitimately " +
+                    "required, pass an explicit allowedClasses set to " +
+                    "SafeObjectInputStream(InputStream, Set).");
         }
-
         return super.resolveClass(desc);
-    }
-
-    private boolean isBlacklisted(String name) {
-        for (String list : DEFAULT_NO_DESERIALIZE_CLASS_NAMES) {
-            if (name.endsWith(list)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 }

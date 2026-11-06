@@ -16,10 +16,18 @@
  */
 package org.apache.kafka.connect.runtime;
 
-import org.apache.kafka.common.config.provider.ConfigProvider;
+import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigTransformer;
 import org.apache.kafka.common.config.ConfigTransformerResult;
+import org.apache.kafka.common.config.provider.ConfigProvider;
+import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.connect.runtime.Herder.ConfigReloadAction;
+import org.apache.kafka.connect.util.Callback;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -28,20 +36,39 @@ import java.util.concurrent.ConcurrentMap;
  * A wrapper class to perform configuration transformations and schedule reloads for any
  * retrieved TTL values.
  */
-public class WorkerConfigTransformer {
+public class WorkerConfigTransformer implements AutoCloseable {
+    private static final Logger log = LoggerFactory.getLogger(WorkerConfigTransformer.class);
+
     private final Worker worker;
     private final ConfigTransformer configTransformer;
     private final ConcurrentMap<String, Map<String, HerderRequest>> requests = new ConcurrentHashMap<>();
+    private final Map<String, ConfigProvider> configProviders;
 
     public WorkerConfigTransformer(Worker worker, Map<String, ConfigProvider> configProviders) {
         this.worker = worker;
+        this.configProviders = configProviders;
         this.configTransformer = new ConfigTransformer(configProviders);
+    }
+
+    public Map<String, String> transform(Map<String, String> configs) {
+        return transform(null, configs);
     }
 
     public Map<String, String> transform(String connectorName, Map<String, String> configs) {
         if (configs == null) return null;
         ConfigTransformerResult result = configTransformer.transform(configs);
-        scheduleReload(connectorName, result.ttls());
+        if (connectorName != null) {
+            String key = ConnectorConfig.CONFIG_RELOAD_ACTION_CONFIG;
+            String action = (String) ConfigDef.parseType(key, configs.get(key), ConfigDef.Type.STRING);
+            if (action == null) {
+                // The default action is "restart".
+                action = ConnectorConfig.CONFIG_RELOAD_ACTION_RESTART;
+            }
+            ConfigReloadAction reloadAction = ConfigReloadAction.valueOf(action.toUpperCase(Locale.ROOT));
+            if (reloadAction == ConfigReloadAction.RESTART) {
+                scheduleReload(connectorName, result.ttls());
+            }
+        }
         return result.data();
     }
 
@@ -52,21 +79,24 @@ public class WorkerConfigTransformer {
     }
 
     private void scheduleReload(String connectorName, String path, long ttl) {
-        Herder herder = worker.herder();
-        if (herder.connectorConfigReloadAction(connectorName) == Herder.ConfigReloadAction.RESTART) {
-            Map<String, HerderRequest> connectorRequests = requests.get(connectorName);
-            if (connectorRequests == null) {
-                connectorRequests = new ConcurrentHashMap<>();
-                requests.put(connectorName, connectorRequests);
-            } else {
-                HerderRequest previousRequest = connectorRequests.get(path);
-                if (previousRequest != null) {
-                    // Delete previous request for ttl which is now stale
-                    previousRequest.cancel();
-                }
+        Map<String, HerderRequest> connectorRequests = requests.computeIfAbsent(connectorName, s -> new ConcurrentHashMap<>());
+        connectorRequests.compute(path, (s, previousRequest) -> {
+            if (previousRequest != null) {
+                // Delete previous request for ttl which is now stale
+                previousRequest.cancel();
             }
-            HerderRequest request = herder.restartConnector(ttl, connectorName, null);
-            connectorRequests.put(path, request);
-        }
+            log.info("Scheduling a restart of connector {} in {} ms", connectorName, ttl);
+            Callback<Void> cb = (error, result) -> {
+                if (error != null) {
+                    log.error("Unexpected error during connector restart: ", error);
+                }
+            };
+            return worker.herder().restartConnector(ttl, connectorName, cb);
+        });
+    }
+
+    @Override
+    public void close() {
+        configProviders.values().forEach(x -> Utils.closeQuietly(x, "config provider"));
     }
 }

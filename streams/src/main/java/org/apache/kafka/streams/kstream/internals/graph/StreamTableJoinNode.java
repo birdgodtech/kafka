@@ -19,47 +19,64 @@ package org.apache.kafka.streams.kstream.internals.graph;
 
 import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
 
+import java.time.Duration;
 import java.util.Arrays;
 
 /**
  * Represents a join between a KStream and a KTable or GlobalKTable
  */
 
-public class StreamTableJoinNode<K, V> extends StreamsGraphNode {
+public class StreamTableJoinNode<K, V, VOut> extends GraphNode {
 
     private final String[] storeNames;
-    private final ProcessorParameters<K, V> processorParameters;
-    private boolean isGlobalKTableJoin;
+    private final ProcessorParameters<K, V, K, VOut> processorParameters;
+    private final String otherJoinSideNodeName;
+    private final Duration gracePeriod;
 
     public StreamTableJoinNode(final String nodeName,
-                        final ProcessorParameters<K, V> processorParameters,
-                        final String[] storeNames) {
-        super(nodeName,
-              false);
+                               final ProcessorParameters<K, V, K, VOut> processorParameters,
+                               final String[] storeNames,
+                               final String otherJoinSideNodeName,
+                               final Duration gracePeriod) {
+        super(nodeName);
 
         // in the case of Stream-Table join the state stores associated with the KTable
         this.storeNames = storeNames;
         this.processorParameters = processorParameters;
+        this.otherJoinSideNodeName = otherJoinSideNodeName;
+        this.gracePeriod = gracePeriod;
     }
 
-    String[] storeNames() {
-        return Arrays.copyOf(storeNames, storeNames.length);
-    }
-
-    ProcessorParameters<K, V> processorParameters() {
-        return processorParameters;
-    }
-
-    public void setGlobalKTableJoin(boolean globalKTableJoin) {
-        isGlobalKTableJoin = globalKTableJoin;
-    }
-
-    boolean isGlobalKTableJoin() {
-        return isGlobalKTableJoin;
+    @Override
+    public String toString() {
+        return "StreamTableJoinNode{" +
+               "storeNames=" + Arrays.toString(storeNames) +
+               ", processorParameters=" + processorParameters +
+               ", otherJoinSideNodeName='" + otherJoinSideNodeName + '\'' +
+               "} " + super.toString();
     }
 
     @Override
     public void writeToTopology(final InternalTopologyBuilder topologyBuilder) {
-        //TODO will implement in follow-up pr
+        final String processorName = processorParameters.processorName();
+
+        // Stream - Table join (Global or KTable)
+        processorParameters.addProcessorTo(topologyBuilder, parentNodeNames());
+
+        // Steam - KTable join only
+        if (otherJoinSideNodeName != null) {
+            topologyBuilder.connectProcessorAndStateStores(processorName, storeNames);
+            if (gracePeriod != null) {
+                for (final String storeName : storeNames) {
+                    if (!topologyBuilder.isStoreVersioned(storeName)) {
+                        throw new IllegalArgumentException("KTable must be versioned to use a grace period in a stream table join.");
+                    }
+                    if (gracePeriod.toMillis() > topologyBuilder.historyRetention(storeName)) {
+                        throw new IllegalArgumentException("History retention must be at least grace period.");
+                    }
+                }
+            }
+        }
+
     }
 }

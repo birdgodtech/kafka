@@ -17,17 +17,14 @@
 
 package org.apache.kafka.clients.admin;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Collection;
 
-
 /**
- * Options for {@link AdminClient#describeLogDirs(Collection)}
- *
- * The API of this class is evolving, see {@link AdminClient} for details.
+ * Options for {@link Admin#describeLogDirs(Collection)}
  */
-@InterfaceStability.Evolving
+@InterfaceAudience.Public
 public class DescribeLogDirsOptions extends AbstractOptions<DescribeLogDirsOptions> {
 
 }

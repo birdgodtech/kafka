@@ -18,39 +18,41 @@
 package org.apache.kafka.streams.state.internals;
 
 import org.apache.kafka.common.utils.Bytes;
-import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.KeyValue;
-import org.apache.kafka.streams.state.KeyValueIterator;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.kafka.streams.state.KeyValueStore;
+import org.apache.kafka.test.GenericInMemoryKeyValueStore;
 
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.Iterator;
 import java.util.List;
 
-import static org.apache.kafka.test.StreamsTestUtils.toList;
-import static org.hamcrest.CoreMatchers.equalTo;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static java.util.Arrays.asList;
+import static org.apache.kafka.test.StreamsTestUtils.toListAndCloseIterator;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class FilteredCacheIteratorTest {
 
     private static final CacheFunction IDENTITY_FUNCTION = new CacheFunction() {
         @Override
-        public Bytes key(Bytes cacheKey) {
+        public Bytes key(final Bytes cacheKey) {
             return cacheKey;
         }
 
         @Override
-        public Bytes cacheKey(Bytes key) {
+        public Bytes cacheKey(final Bytes key) {
             return key;
         }
     };
 
-    @SuppressWarnings("unchecked")
-    private final InMemoryKeyValueStore<Bytes, LRUCacheEntry> store = new InMemoryKeyValueStore("name", null, null);
+    private final KeyValueStore<Bytes, LRUCacheEntry> store = new GenericInMemoryKeyValueStore<>("my-store");
     private final KeyValue<Bytes, LRUCacheEntry> firstEntry = KeyValue.pair(Bytes.wrap("a".getBytes()),
                                                                             new LRUCacheEntry("1".getBytes()));
-    private final List<KeyValue<Bytes, LRUCacheEntry>> entries = Utils.mkList(
+    private final List<KeyValue<Bytes, LRUCacheEntry>> entries = asList(
             firstEntry,
             KeyValue.pair(Bytes.wrap("b".getBytes()),
                           new LRUCacheEntry("2".getBytes())),
@@ -60,25 +62,15 @@ public class FilteredCacheIteratorTest {
     private FilteredCacheIterator allIterator;
     private FilteredCacheIterator firstEntryIterator;
 
-    @Before
+    @BeforeEach
     public void before() {
         store.putAll(entries);
-        final HasNextCondition allCondition = new HasNextCondition() {
-            @Override
-            public boolean hasNext(final KeyValueIterator<Bytes, ?> iterator) {
-                return iterator.hasNext();
-            }
-        };
+        final HasNextCondition allCondition = Iterator::hasNext;
         allIterator = new FilteredCacheIterator(
             new DelegatingPeekingKeyValueIterator<>("",
                                                     store.all()), allCondition, IDENTITY_FUNCTION);
 
-        final HasNextCondition firstEntryCondition = new HasNextCondition() {
-            @Override
-            public boolean hasNext(final KeyValueIterator<Bytes, ?> iterator) {
-                return iterator.hasNext() && iterator.peekNextKey().equals(firstEntry.key);
-            }
-        };
+        final HasNextCondition firstEntryCondition = iterator -> iterator.hasNext() && iterator.peekNextKey().equals(firstEntry.key);
         firstEntryIterator = new FilteredCacheIterator(
                 new DelegatingPeekingKeyValueIterator<>("",
                                                         store.all()), firstEntryCondition, IDENTITY_FUNCTION);
@@ -87,8 +79,8 @@ public class FilteredCacheIteratorTest {
 
     @Test
     public void shouldAllowEntryMatchingHasNextCondition() {
-        final List<KeyValue<Bytes, LRUCacheEntry>> keyValues = toList(allIterator);
-        assertThat(keyValues, equalTo(entries));
+        final List<KeyValue<Bytes, LRUCacheEntry>> keyValues = toListAndCloseIterator(allIterator);
+        assertEquals(entries, keyValues);
     }
 
     @Test
@@ -96,7 +88,7 @@ public class FilteredCacheIteratorTest {
         while (allIterator.hasNext()) {
             final Bytes nextKey = allIterator.peekNextKey();
             final KeyValue<Bytes, LRUCacheEntry> next = allIterator.next();
-            assertThat(next.key, equalTo(nextKey));
+            assertEquals(nextKey, next.key);
         }
     }
 
@@ -105,7 +97,7 @@ public class FilteredCacheIteratorTest {
         while (allIterator.hasNext()) {
             final KeyValue<Bytes, LRUCacheEntry> peeked = allIterator.peekNext();
             final KeyValue<Bytes, LRUCacheEntry> next = allIterator.next();
-            assertThat(peeked, equalTo(next));
+            assertEquals(next, peeked);
         }
     }
 
@@ -118,13 +110,13 @@ public class FilteredCacheIteratorTest {
 
     @Test
     public void shouldFilterEntriesNotMatchingHasNextCondition() {
-        final List<KeyValue<Bytes, LRUCacheEntry>> keyValues = toList(firstEntryIterator);
-        assertThat(keyValues, equalTo(Utils.mkList(firstEntry)));
+        final List<KeyValue<Bytes, LRUCacheEntry>> keyValues = toListAndCloseIterator(firstEntryIterator);
+        assertEquals(List.of(firstEntry), keyValues);
     }
 
-    @Test(expected = UnsupportedOperationException.class)
-    public void shouldThrowUnsupportedOperationExeceptionOnRemove() {
-        allIterator.remove();
+    @Test
+    public void shouldThrowUnsupportedOperationExceptionOnRemove() {
+        assertThrows(UnsupportedOperationException.class, () -> allIterator.remove());
     }
 
 }

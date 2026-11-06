@@ -13,26 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+from ducktape.mark import matrix
 from ducktape.mark.resource import cluster
 
-from kafkatest.tests.kafka_test import KafkaTest
+from kafkatest.services.kafka import KafkaService, quorum
 from kafkatest.services.streams import StreamsSmokeTestDriverService, StreamsSmokeTestJobRunnerService
-import time
+from kafkatest.tests.streams.base_streams_test import BaseStreamsTest
+from kafkatest.version import LATEST_4_3
 
-
-class StreamsSmokeTest(KafkaTest):
+class StreamsSmokeTest(BaseStreamsTest):
     """
     Simple test of Kafka Streams.
     """
 
     def __init__(self, test_context):
-        super(StreamsSmokeTest, self).__init__(test_context, num_zk=1, num_brokers=3, topics={
+        super(StreamsSmokeTest, self).__init__(test_context, topics={
             'echo' : { 'partitions': 5, 'replication-factor': 1 },
             'data' : { 'partitions': 5, 'replication-factor': 1 },
             'min' : { 'partitions': 5, 'replication-factor': 1 },
+            'min-suppressed' : { 'partitions': 5, 'replication-factor': 1 },
+            'min-raw' : { 'partitions': 5, 'replication-factor': 1 },
             'max' : { 'partitions': 5, 'replication-factor': 1 },
             'sum' : { 'partitions': 5, 'replication-factor': 1 },
+            'sws-raw' : { 'partitions': 5, 'replication-factor': 1 },
+            'sws-suppressed' : { 'partitions': 5, 'replication-factor': 1 },
             'dif' : { 'partitions': 5, 'replication-factor': 1 },
             'cnt' : { 'partitions': 5, 'replication-factor': 1 },
             'avg' : { 'partitions': 5, 'replication-factor': 1 },
@@ -40,40 +44,128 @@ class StreamsSmokeTest(KafkaTest):
             'tagg' : { 'partitions': 5, 'replication-factor': 1 }
         })
 
+        self.test_context = test_context
         self.driver = StreamsSmokeTestDriverService(test_context, self.kafka)
-        self.processor1 = StreamsSmokeTestJobRunnerService(test_context, self.kafka)
-        self.processor2 = StreamsSmokeTestJobRunnerService(test_context, self.kafka)
-        self.processor3 = StreamsSmokeTestJobRunnerService(test_context, self.kafka)
-        self.processor4 = StreamsSmokeTestJobRunnerService(test_context, self.kafka)
 
-    @ignore # ignore this test until StandbyTask supports streamTime
-    @cluster(num_nodes=9)
-    def test_streams(self):
-        """
-        Start a few smoke test clients, then repeat start a new one, stop (cleanly) running one a few times.
-        Ensure that all results (stats on values computed by Kafka Streams) are correct.
-        """
+    @cluster(num_nodes=8)
+    @matrix(processing_guarantee=['exactly_once_v2', 'at_least_once'],
+            crash=[True, False],
+            metadata_quorum=[quorum.combined_kraft],
+            group_protocol=["classic", "streams"],
+            enable_assignment_batching=[True])
+    @matrix(processing_guarantee=['exactly_once_v2'],
+            crash=[True, False],
+            metadata_quorum=[quorum.combined_kraft],
+            group_protocol=["streams"],
+            enable_assignment_batching=[False, True])
+    # transactional state stores (KIP-892) are an EOS feature; exercise them under EOS + crash
+    @matrix(processing_guarantee=['exactly_once_v2'],
+            crash=[True, False],
+            metadata_quorum=[quorum.combined_kraft],
+            group_protocol=["streams"],
+            enable_assignment_batching=[True],
+            transactional=[True])
+    def test_streams(self, processing_guarantee, crash, metadata_quorum, group_protocol, enable_assignment_batching, transactional=False):
+        processor1 = StreamsSmokeTestJobRunnerService(self.test_context, self.kafka, processing_guarantee, group_protocol, transactional=transactional)
+        processor2 = StreamsSmokeTestJobRunnerService(self.test_context, self.kafka, processing_guarantee, group_protocol, transactional=transactional)
+        processor3 = StreamsSmokeTestJobRunnerService(self.test_context, self.kafka, processing_guarantee, group_protocol, transactional=transactional)
 
-        self.driver.start()
+        with processor1.node.account.monitor_log(processor1.STDOUT_FILE) as monitor1:
+            processor1.start()
+            monitor1.wait_until('REBALANCING -> RUNNING',
+                               timeout_sec=60,
+                               err_msg="Never saw 'REBALANCING -> RUNNING' message " + str(processor1.node.account)
+                               )
 
-        self.processor1.start()
-        self.processor2.start()
+            self.driver.start()
 
-        time.sleep(15)
+            monitor1.wait_until('processed',
+                                timeout_sec=30,
+                                err_msg="Didn't see any processing messages " + str(processor1.node.account)
+                                )
 
-        self.processor3.start()
-        self.processor1.stop()
+            # make sure we're not already done processing (which would invalidate the test)
+            self.driver.node.account.ssh("! grep 'Result Verification' %s" % self.driver.STDOUT_FILE, allow_fail=False)
 
-        time.sleep(15)
+            processor1.stop_nodes(not crash)
 
-        self.processor4.start()
+        with processor2.node.account.monitor_log(processor2.STDOUT_FILE) as monitor2:
+            processor2.start()
+            monitor2.wait_until('REBALANCING -> RUNNING',
+                                timeout_sec=120,
+                                err_msg="Never saw 'REBALANCING -> RUNNING' message " + str(processor2.node.account)
+                                )
+            monitor2.wait_until('processed',
+                                timeout_sec=30,
+                                err_msg="Didn't see any processing messages " + str(processor2.node.account)
+                                )
+
+        # make sure we're not already done processing (which would invalidate the test)
+        self.driver.node.account.ssh("! grep 'Result Verification' %s" % self.driver.STDOUT_FILE, allow_fail=False)
+
+        processor2.stop_nodes(not crash)
+
+        with processor3.node.account.monitor_log(processor3.STDOUT_FILE) as monitor3:
+            processor3.start()
+            monitor3.wait_until('REBALANCING -> RUNNING',
+                                timeout_sec=120,
+                                err_msg="Never saw 'REBALANCING -> RUNNING' message " + str(processor3.node.account)
+                                )
+            # there should still be some data left for this processor to work on.
+            monitor3.wait_until('processed',
+                                timeout_sec=30,
+                                err_msg="Didn't see any processing messages " + str(processor3.node.account)
+                                )
 
         self.driver.wait()
         self.driver.stop()
 
-        self.processor2.stop()
-        self.processor3.stop()
-        self.processor4.stop()
+        processor3.stop()
 
-        node = self.driver.node
-        node.account.ssh("grep SUCCESS %s" % self.driver.STDOUT_FILE, allow_fail=False)
+        self.driver.node.account.ssh("grep SUCCESS %s" % self.driver.STDOUT_FILE, allow_fail=False)
+
+    @cluster(num_nodes=5)
+    @matrix(metadata_quorum=[quorum.combined_kraft])
+    def test_old_client_not_solicited_for_topology_push(self, metadata_quorum):
+        """
+        Test the situation when a pre-KIP-1331 Kafka Streams client uses the streams group
+        protocol against a broker on this branch with the topology description plugin configured
+        (the default broker setup from BaseStreamsTest). StreamsGroupHeartbeat negotiates down to
+        version 0 for this client, so the broker must never solicit a topology description push
+        for it.
+        """
+        processor = StreamsSmokeTestJobRunnerService(self.test_context, self.kafka, 'at_least_once', 'streams')
+        processor.set_version(str(LATEST_4_3))
+
+        broker_log = "%s/server.log" % KafkaService.OPERATIONAL_LOG_INFO_DIR
+
+        with processor.node.account.monitor_log(processor.STDOUT_FILE) as monitor:
+            processor.start()
+            monitor.wait_until('REBALANCING -> RUNNING',
+                               timeout_sec=60,
+                               err_msg="Never saw 'REBALANCING -> RUNNING' message " + str(processor.node.account)
+                               )
+
+            self.driver.start()
+
+            monitor.wait_until('processed',
+                                timeout_sec=30,
+                                err_msg="Didn't see any processing messages " + str(processor.node.account)
+                                )
+
+        self.driver.wait()
+        self.driver.stop()
+        processor.stop()
+
+        self.driver.node.account.ssh("grep SUCCESS %s" % self.driver.STDOUT_FILE, allow_fail=False)
+
+        # BaseStreamsTest runs 3 brokers and the group coordinator for this group can land on
+        # any of them, so every broker's log needs to be checked, not just one.
+        solicited = 0
+        for broker_node in self.kafka.nodes:
+            count = broker_node.account.ssh_capture(
+                "grep -c 'Requested topology description push at topology epoch' %s || true" % broker_log,
+                allow_fail=False)
+            solicited += int(next(count).strip())
+        assert solicited == 0, \
+            "A broker solicited a topology description push for a pre-KIP-1331 streams client"

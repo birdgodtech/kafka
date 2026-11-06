@@ -16,10 +16,9 @@
  */
 package org.apache.kafka.common.protocol.types;
 
-import org.apache.kafka.common.record.BaseRecords;
-
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * A record that can be serialized and deserialized according to a pre-defined schema
@@ -75,66 +74,6 @@ public class Struct {
         return getFieldOrDefault(field);
     }
 
-    public Byte get(Field.Int8 field) {
-        return getByte(field.name);
-    }
-
-    public Integer get(Field.Int32 field) {
-        return getInt(field.name);
-    }
-
-    public Long get(Field.Int64 field) {
-        return getLong(field.name);
-    }
-
-    public Short get(Field.Int16 field) {
-        return getShort(field.name);
-    }
-
-    public String get(Field.Str field) {
-        return getString(field.name);
-    }
-
-    public String get(Field.NullableStr field) {
-        return getString(field.name);
-    }
-
-    public Long getOrElse(Field.Int64 field, long alternative) {
-        if (hasField(field.name))
-            return getLong(field.name);
-        return alternative;
-    }
-
-    public Short getOrElse(Field.Int16 field, short alternative) {
-        if (hasField(field.name))
-            return getShort(field.name);
-        return alternative;
-    }
-
-    public Byte getOrElse(Field.Int8 field, byte alternative) {
-        if (hasField(field.name))
-            return getByte(field.name);
-        return alternative;
-    }
-
-    public Integer getOrElse(Field.Int32 field, int alternative) {
-        if (hasField(field.name))
-            return getInt(field.name);
-        return alternative;
-    }
-
-    public String getOrElse(Field.NullableStr field, String alternative) {
-        if (hasField(field.name))
-            return getString(field.name);
-        return alternative;
-    }
-
-    public String getOrElse(Field.Str field, String alternative) {
-        if (hasField(field.name))
-            return getString(field.name);
-        return alternative;
-    }
-
     /**
      * Get the record value for the field with the given name by doing a hash table lookup (slower!)
      *
@@ -158,87 +97,24 @@ public class Struct {
         return schema.get(name) != null;
     }
 
-    public boolean hasField(Field def) {
-        return schema.get(def.name) != null;
-    }
-
-    public Struct getStruct(BoundField field) {
-        return (Struct) get(field);
-    }
-
-    public Struct getStruct(String name) {
-        return (Struct) get(name);
-    }
-
-    public Byte getByte(BoundField field) {
-        return (Byte) get(field);
-    }
-
-    public byte getByte(String name) {
-        return (Byte) get(name);
-    }
-
-    public BaseRecords getRecords(String name) {
-        return (BaseRecords) get(name);
-    }
-
-    public Short getShort(BoundField field) {
-        return (Short) get(field);
-    }
-
     public Short getShort(String name) {
         return (Short) get(name);
-    }
-
-    public Integer getInt(BoundField field) {
-        return (Integer) get(field);
     }
 
     public Integer getInt(String name) {
         return (Integer) get(name);
     }
 
-    public Long getUnsignedInt(String name) {
-        return (Long) get(name);
-    }
-
-    public Long getLong(BoundField field) {
-        return (Long) get(field);
-    }
-
     public Long getLong(String name) {
         return (Long) get(name);
-    }
-
-    public Object[] getArray(BoundField field) {
-        return (Object[]) get(field);
     }
 
     public Object[] getArray(String name) {
         return (Object[]) get(name);
     }
 
-    public String getString(BoundField field) {
-        return (String) get(field);
-    }
-
     public String getString(String name) {
         return (String) get(name);
-    }
-
-    public Boolean getBoolean(BoundField field) {
-        return (Boolean) get(field);
-    }
-
-    public Boolean getBoolean(String name) {
-        return (Boolean) get(name);
-    }
-
-    public ByteBuffer getBytes(BoundField field) {
-        Object result = get(field);
-        if (result instanceof byte[])
-            return ByteBuffer.wrap((byte[]) result);
-        return (ByteBuffer) result;
     }
 
     public ByteBuffer getBytes(String name) {
@@ -276,41 +152,6 @@ public class Struct {
         return this;
     }
 
-    public Struct set(Field.Str def, String value) {
-        return set(def.name, value);
-    }
-
-    public Struct set(Field.NullableStr def, String value) {
-        return set(def.name, value);
-    }
-
-    public Struct set(Field.Int8 def, byte value) {
-        return set(def.name, value);
-    }
-
-    public Struct set(Field.Int32 def, int value) {
-        return set(def.name, value);
-    }
-
-    public Struct set(Field.Int64 def, long value) {
-        return set(def.name, value);
-    }
-
-    public Struct set(Field.Int16 def, short value) {
-        return set(def.name, value);
-    }
-
-    public Struct setIfExists(Field def, Object value) {
-        return setIfExists(def.name, value);
-    }
-
-    public Struct setIfExists(String fieldName, Object value) {
-        BoundField field = this.schema.get(fieldName);
-        if (field != null)
-            this.values[field.index] = value;
-        return this;
-    }
-
     /**
      * Create a struct for the schema of a container type (struct or array). Note that for array type, this method
      * assumes that the type is an array of schema and creates a struct of that schema. Arrays of other types can't be
@@ -324,9 +165,8 @@ public class Struct {
         validateField(field);
         if (field.def.type instanceof Schema) {
             return new Struct((Schema) field.def.type);
-        } else if (field.def.type instanceof ArrayOf) {
-            ArrayOf array = (ArrayOf) field.def.type;
-            return new Struct((Schema) array.type());
+        } else if (field.def.type.isArray()) {
+            return new Struct((Schema) field.def.type.arrayElementType().get());
         } else {
             throw new SchemaException("Field '" + field.def.name + "' is not a container type, it is of type " + field.def.type);
         }
@@ -341,6 +181,10 @@ public class Struct {
      */
     public Struct instance(String field) {
         return instance(schema.get(field));
+    }
+
+    public Struct instance(Field field) {
+        return instance(schema.get(field.name));
     }
 
     /**
@@ -370,6 +214,7 @@ public class Struct {
      * @throws SchemaException If validation fails
      */
     private void validateField(BoundField field) {
+        Objects.requireNonNull(field, "`field` must be non-null");
         if (this.schema != field.schema)
             throw new SchemaException("Attempt to access field '" + field.def.name + "' from a different schema instance.");
         if (field.index > values.length)
@@ -393,7 +238,7 @@ public class Struct {
             BoundField f = this.schema.get(i);
             b.append(f.def.name);
             b.append('=');
-            if (f.def.type instanceof ArrayOf && this.values[i] != null) {
+            if (f.def.type.isArray() && this.values[i] != null) {
                 Object[] arrayValue = (Object[]) this.values[i];
                 b.append('[');
                 for (int j = 0; j < arrayValue.length; j++) {
@@ -417,7 +262,7 @@ public class Struct {
         int result = 1;
         for (int i = 0; i < this.values.length; i++) {
             BoundField f = this.schema.get(i);
-            if (f.def.type instanceof ArrayOf) {
+            if (f.def.type.isArray()) {
                 if (this.get(f) != null) {
                     Object[] arrayObject = (Object[]) this.get(f);
                     for (Object arrayItem: arrayObject)
@@ -447,17 +292,16 @@ public class Struct {
         for (int i = 0; i < this.values.length; i++) {
             BoundField f = this.schema.get(i);
             boolean result;
-            if (f.def.type instanceof ArrayOf) {
+            if (f.def.type.isArray()) {
                 result = Arrays.equals((Object[]) this.get(f), (Object[]) other.get(f));
             } else {
                 Object thisField = this.get(f);
                 Object otherField = other.get(f);
-                return (thisField == null) ? (otherField == null) : thisField.equals(otherField);
+                result = Objects.equals(thisField, otherField);
             }
             if (!result)
                 return false;
         }
         return true;
     }
-
 }

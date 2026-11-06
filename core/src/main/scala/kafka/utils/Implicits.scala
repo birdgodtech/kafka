@@ -20,7 +20,7 @@ package kafka.utils
 import java.util
 import java.util.Properties
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 /**
   * In order to have these implicits in scope, add the following import:
@@ -45,5 +45,4 @@ object Implicits {
       (properties: util.Hashtable[AnyRef, AnyRef]).putAll(map.asJava)
 
   }
-
 }

@@ -1,0 +1,290 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.coordinator.group.modern;
+
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorMetadataImage;
+import org.apache.kafka.coordinator.common.runtime.KRaftCoordinatorMetadataImage;
+import org.apache.kafka.coordinator.common.runtime.MetadataImageBuilder;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.HashSet;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+
+public class TopicIdsTest {
+
+    @Test
+    public void testTopicNamesCannotBeNull() {
+        assertThrows(NullPointerException.class, () -> new TopicIds(null, CoordinatorMetadataImage.EMPTY));
+    }
+
+    @Test
+    public void testTopicsImageCannotBeNull() {
+        assertThrows(NullPointerException.class, () -> new TopicIds(Set.of(), (CoordinatorMetadataImage) null));
+    }
+
+    @Test
+    public void testTopicResolverCannotBeNull() {
+        assertThrows(NullPointerException.class, () -> new TopicIds(Set.of(), (TopicIds.TopicResolver) null));
+    }
+
+    @Test
+    public void testSize() {
+        Set<String> topicNames = Set.of("foo", "bar", "baz");
+        Set<Uuid> topicIds = new TopicIds(topicNames, CoordinatorMetadataImage.EMPTY);
+        assertEquals(topicNames.size(), topicIds.size());
+    }
+
+    @Test
+    public void testIsEmpty() {
+        Set<String> topicNames = Set.of();
+        Set<Uuid> topicIds = new TopicIds(topicNames, CoordinatorMetadataImage.EMPTY);
+        assertEquals(topicNames.size(), topicIds.size());
+    }
+
+    @Test
+    public void testContains() {
+        Uuid fooUuid = Uuid.randomUuid();
+        Uuid barUuid = Uuid.randomUuid();
+        Uuid bazUuid = Uuid.randomUuid();
+        Uuid quxUuid = Uuid.randomUuid();
+        CoordinatorMetadataImage metadataImage = new KRaftCoordinatorMetadataImage(new MetadataImageBuilder()
+            .addTopic(fooUuid, "foo", 3)
+            .addTopic(barUuid, "bar", 3)
+            .addTopic(bazUuid, "qux", 3)
+            .build());
+
+        Set<Uuid> topicIds = new TopicIds(Set.of("foo", "bar", "baz"), metadataImage);
+
+        assertTrue(topicIds.contains(fooUuid));
+        assertTrue(topicIds.contains(barUuid));
+        assertFalse(topicIds.contains(bazUuid));
+        assertFalse(topicIds.contains(quxUuid));
+    }
+
+    @Test
+    public void testContainsAll() {
+        Uuid fooUuid = Uuid.randomUuid();
+        Uuid barUuid = Uuid.randomUuid();
+        Uuid bazUuid = Uuid.randomUuid();
+        Uuid quxUuid = Uuid.randomUuid();
+        CoordinatorMetadataImage metadataImage = new KRaftCoordinatorMetadataImage(new MetadataImageBuilder()
+            .addTopic(fooUuid, "foo", 3)
+            .addTopic(barUuid, "bar", 3)
+            .addTopic(bazUuid, "baz", 3)
+            .addTopic(quxUuid, "qux", 3)
+            .build());
+
+        Set<Uuid> topicIds = new TopicIds(Set.of("foo", "bar", "baz", "qux"), metadataImage);
+
+        assertTrue(topicIds.contains(fooUuid));
+        assertTrue(topicIds.contains(barUuid));
+        assertTrue(topicIds.contains(bazUuid));
+        assertTrue(topicIds.contains(quxUuid));
+        assertTrue(topicIds.containsAll(Set.of(fooUuid, barUuid, bazUuid, quxUuid)));
+    }
+
+    @Test
+    public void testContainsAllOneTopicConversionFails() {
+        // topic 'qux' only exists as topic name.
+        Uuid fooUuid = Uuid.randomUuid();
+        Uuid barUuid = Uuid.randomUuid();
+        Uuid bazUuid = Uuid.randomUuid();
+        Uuid quxUuid = Uuid.randomUuid();
+        CoordinatorMetadataImage metadataImage = new KRaftCoordinatorMetadataImage(new MetadataImageBuilder()
+            .addTopic(fooUuid, "foo", 3)
+            .addTopic(barUuid, "bar", 3)
+            .addTopic(bazUuid, "baz", 3)
+            .build());
+
+        Set<Uuid> topicIds = new TopicIds(Set.of("foo", "bar", "baz", "qux"), metadataImage);
+
+        assertTrue(topicIds.contains(fooUuid));
+        assertTrue(topicIds.contains(barUuid));
+        assertTrue(topicIds.contains(bazUuid));
+        assertTrue(topicIds.containsAll(Set.of(fooUuid, barUuid, bazUuid)));
+        assertFalse(topicIds.containsAll(Set.of(fooUuid, barUuid, bazUuid, quxUuid)));
+    }
+
+    @Test
+    public void testIterator() {
+        Uuid fooUuid = Uuid.randomUuid();
+        Uuid barUuid = Uuid.randomUuid();
+        Uuid bazUuid = Uuid.randomUuid();
+        Uuid quxUuid = Uuid.randomUuid();
+        CoordinatorMetadataImage metadataImage = new KRaftCoordinatorMetadataImage(new MetadataImageBuilder()
+            .addTopic(fooUuid, "foo", 3)
+            .addTopic(barUuid, "bar", 3)
+            .addTopic(bazUuid, "baz", 3)
+            .addTopic(quxUuid, "qux", 3)
+            .build());
+
+        Set<Uuid> topicIds = new TopicIds(Set.of("foo", "bar", "baz", "qux"), metadataImage);
+        Set<Uuid> expectedIds = Set.of(fooUuid, barUuid, bazUuid, quxUuid);
+        Set<Uuid> actualIds = new HashSet<>(topicIds);
+
+        assertEquals(expectedIds, actualIds);
+    }
+
+    @Test
+    public void testIteratorOneTopicConversionFails() {
+        // topic 'qux' only exists as topic id.
+        // topic 'quux' only exists as topic name.
+        Uuid fooUuid = Uuid.randomUuid();
+        Uuid barUuid = Uuid.randomUuid();
+        Uuid bazUuid = Uuid.randomUuid();
+        Uuid qux = Uuid.randomUuid();
+        CoordinatorMetadataImage metadataImage = new KRaftCoordinatorMetadataImage(new MetadataImageBuilder()
+            .addTopic(fooUuid, "foo", 3)
+            .addTopic(barUuid, "bar", 3)
+            .addTopic(bazUuid, "baz", 3)
+            .addTopic(qux, "qux", 3)
+            .build());
+
+        Set<Uuid> topicIds = new TopicIds(Set.of("foo", "bar", "baz", "quux"), metadataImage);
+        Set<Uuid> expectedIds = Set.of(fooUuid, barUuid, bazUuid);
+        Set<Uuid> actualIds = new HashSet<>(topicIds);
+
+        assertEquals(expectedIds, actualIds);
+    }
+
+    @Test
+    public void testToArray() {
+        var fooUuid = Uuid.randomUuid();
+        var barUuid = Uuid.randomUuid();
+        var bazUuid = Uuid.randomUuid();
+        var metadataImage = new KRaftCoordinatorMetadataImage(
+            new MetadataImageBuilder()
+                .addTopic(fooUuid, "foo", 3)
+                .addTopic(barUuid, "bar", 3)
+                .addTopic(bazUuid, "baz", 3)
+                .build()
+        );
+
+        var topicIds = new TopicIds(Set.of("foo", "bar", "baz"), metadataImage);
+
+        assertEquals(Set.of(fooUuid, barUuid, bazUuid), Set.of(topicIds.toArray()));
+        assertEquals(Set.of(fooUuid, barUuid, bazUuid), Set.of(topicIds.toArray(new Uuid[0])));
+
+        // An array which is large enough is filled in place, and the element after the last
+        // one is set to null.
+        var large = new Uuid[4];
+        assertSame(large, topicIds.toArray(large));
+        assertEquals(Set.of(fooUuid, barUuid, bazUuid), Set.of(large[0], large[1], large[2]));
+        assertNull(large[3]);
+    }
+
+    @Test
+    public void testToArrayOneTopicConversionFails() {
+        // topic 'qux' only exists as topic id.
+        // topic 'baz' only exists as topic name.
+        var fooUuid = Uuid.randomUuid();
+        var barUuid = Uuid.randomUuid();
+        var quxUuid = Uuid.randomUuid();
+        var metadataImage = new KRaftCoordinatorMetadataImage(
+            new MetadataImageBuilder()
+                .addTopic(fooUuid, "foo", 3)
+                .addTopic(barUuid, "bar", 3)
+                .addTopic(quxUuid, "qux", 3)
+                .build()
+        );
+
+        var topicIds = new TopicIds(Set.of("foo", "bar", "baz"), metadataImage);
+
+        // The arrays hold the ids of the topics which exist, so fewer than the size.
+        assertEquals(3, topicIds.size());
+        assertEquals(Set.of(fooUuid, barUuid), Set.of(topicIds.toArray()));
+        assertEquals(Set.of(fooUuid, barUuid), Set.of(topicIds.toArray(new Uuid[0])));
+    }
+
+    @Test
+    public void testEquals() {
+        Uuid topicId = Uuid.randomUuid();
+        KRaftCoordinatorMetadataImage metadataImage = new KRaftCoordinatorMetadataImage(new MetadataImageBuilder()
+            .addTopic(topicId, "topicId", 3)
+            .build());
+
+        TopicIds topicIds1 = new TopicIds(Set.of("topic"), metadataImage);
+        TopicIds topicIds2 = new TopicIds(Set.of("topic"), metadataImage);
+
+        assertEquals(topicIds1, topicIds2);
+    }
+
+    @Test
+    public void testCachedTopicResolverId() {
+        var fooUuid = Uuid.randomUuid();
+        var metadataImage = spy(new KRaftCoordinatorMetadataImage(
+            new MetadataImageBuilder()
+                .addTopic(fooUuid, "foo", 3)
+                .build()
+        ));
+        var resolver = new TopicIds.CachedTopicResolver(metadataImage);
+
+        // A known topic is looked up in the image once, then served from the cache.
+        assertEquals(fooUuid, resolver.id("foo"));
+        assertEquals(fooUuid, resolver.id("foo"));
+        verify(metadataImage, times(1)).topicId("foo");
+
+        // An unknown topic is not cached, so it is looked up in the image every time.
+        assertNull(resolver.id("bar"));
+        assertNull(resolver.id("bar"));
+        verify(metadataImage, times(2)).topicId("bar");
+
+        // A cleared cache looks up the known topic in the image again.
+        resolver.clear();
+        assertEquals(fooUuid, resolver.id("foo"));
+        verify(metadataImage, times(2)).topicId("foo");
+    }
+
+    @Test
+    public void testCachedTopicResolverName() {
+        var fooUuid = Uuid.randomUuid();
+        var barUuid = Uuid.randomUuid();
+        var metadataImage = spy(new KRaftCoordinatorMetadataImage(
+            new MetadataImageBuilder()
+                .addTopic(fooUuid, "foo", 3)
+                .build()
+        ));
+        var resolver = new TopicIds.CachedTopicResolver(metadataImage);
+
+        // A known topic is looked up in the image once, then served from the cache.
+        assertEquals("foo", resolver.name(fooUuid));
+        assertEquals("foo", resolver.name(fooUuid));
+        verify(metadataImage, times(1)).topicName(fooUuid);
+
+        // An unknown topic is not cached, so it is looked up in the image every time.
+        assertNull(resolver.name(barUuid));
+        assertNull(resolver.name(barUuid));
+        verify(metadataImage, times(2)).topicName(barUuid);
+
+        // A cleared cache looks up the known topic in the image again.
+        resolver.clear();
+        assertEquals("foo", resolver.name(fooUuid));
+        verify(metadataImage, times(2)).topicName(fooUuid);
+    }
+}

@@ -16,33 +16,36 @@
  */
 package org.apache.kafka.connect.runtime;
 
-import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.metrics.PluginMetrics;
 import org.apache.kafka.connect.errors.IllegalWorkerStateException;
-import org.apache.kafka.connect.runtime.distributed.ClusterConfigState;
+import org.apache.kafka.connect.sink.ErrantRecordReporter;
 import org.apache.kafka.connect.sink.SinkTaskContext;
+import org.apache.kafka.connect.storage.ClusterConfigState;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 public class WorkerSinkTaskContext implements SinkTaskContext {
 
-    private final Logger log = LoggerFactory.getLogger(getClass());
-    private Map<TopicPartition, Long> offsets;
-    private long timeoutMs;
-    private KafkaConsumer<byte[], byte[]> consumer;
+    private static final Logger log = LoggerFactory.getLogger(WorkerSinkTaskContext.class);
+    private final Map<TopicPartition, Long> offsets;
+    private final Consumer<byte[], byte[]> consumer;
     private final WorkerSinkTask sinkTask;
     private final ClusterConfigState configState;
     private final Set<TopicPartition> pausedPartitions;
+    private long timeoutMs;
     private boolean commitRequested;
 
-    public WorkerSinkTaskContext(KafkaConsumer<byte[], byte[]> consumer,
+    public WorkerSinkTaskContext(Consumer<byte[], byte[]> consumer,
                                  WorkerSinkTask sinkTask,
                                  ClusterConfigState configState) {
         this.offsets = new HashMap<>();
@@ -114,7 +117,7 @@ public class WorkerSinkTaskContext implements SinkTaskContext {
             if (sinkTask.shouldPause()) {
                 log.debug("{} Connector is paused, so not pausing consumer's partitions {}", this, partitions);
             } else {
-                consumer.pause(Arrays.asList(partitions));
+                consumer.pause(List.of(partitions));
                 log.debug("{} Pausing partitions {}. Connector is not paused.", this, partitions);
             }
         } catch (IllegalStateException e) {
@@ -128,12 +131,13 @@ public class WorkerSinkTaskContext implements SinkTaskContext {
             throw new IllegalWorkerStateException("SinkTaskContext may not be used to resume consumption until the task is initialized");
         }
         try {
-            pausedPartitions.removeAll(Arrays.asList(partitions));
+            List<TopicPartition> partitionList = List.of(partitions);
+            partitionList.forEach(pausedPartitions::remove);
             if (sinkTask.shouldPause()) {
-                log.debug("{} Connector is paused, so not resuming consumer's partitions {}", this, partitions);
+                log.debug("{} Connector is paused, so not resuming consumer's partitions {}", this, partitionList);
             } else {
-                consumer.resume(Arrays.asList(partitions));
-                log.debug("{} Resuming partitions: {}", this, partitions);
+                consumer.resume(partitionList);
+                log.debug("{} Resuming partitions: {}", this, partitionList);
             }
         } catch (IllegalStateException e) {
             throw new IllegalWorkerStateException("SinkTasks may not resume partitions that are not currently assigned to them.", e);
@@ -156,6 +160,16 @@ public class WorkerSinkTaskContext implements SinkTaskContext {
 
     public void clearCommitRequest() {
         commitRequested = false;
+    }
+
+    @Override
+    public ErrantRecordReporter errantRecordReporter() {
+        return sinkTask.workerErrantRecordReporter();
+    }
+
+    @Override
+    public PluginMetrics pluginMetrics() {
+        return sinkTask.pluginMetrics();
     }
 
     @Override

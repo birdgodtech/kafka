@@ -16,401 +16,553 @@
  */
 package org.apache.kafka.streams.processor.internals;
 
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.MockConsumer;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.clients.consumer.OffsetResetStrategy;
+import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.metrics.KafkaMetric;
+import org.apache.kafka.common.metrics.MetricConfig;
 import org.apache.kafka.common.metrics.Metrics;
-import org.apache.kafka.common.record.TimestampType;
+import org.apache.kafka.common.metrics.Sensor;
+import org.apache.kafka.common.metrics.stats.CumulativeSum;
 import org.apache.kafka.common.serialization.IntegerSerializer;
-import org.apache.kafka.common.serialization.Serdes;
-import org.apache.kafka.common.serialization.Serializer;
-import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.utils.internals.LogContext;
 import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.TopologyConfig;
+import org.apache.kafka.streams.errors.LockException;
 import org.apache.kafka.streams.errors.ProcessorStateException;
-import org.apache.kafka.streams.kstream.internals.ConsumedInternal;
-import org.apache.kafka.streams.kstream.internals.InternalStreamsBuilder;
-import org.apache.kafka.streams.kstream.internals.InternalStreamsBuilderTest;
+import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.processor.TaskId;
-import org.apache.kafka.streams.state.internals.OffsetCheckpoint;
+import org.apache.kafka.streams.processor.internals.Task.TaskType;
+import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
+import org.apache.kafka.streams.state.internals.ThreadCache;
+import org.apache.kafka.test.MockKeyValueStore;
+import org.apache.kafka.test.MockKeyValueStoreBuilder;
 import org.apache.kafka.test.MockRestoreConsumer;
-import org.apache.kafka.test.MockStateRestoreListener;
-import org.apache.kafka.test.MockStateStore;
-import org.apache.kafka.test.MockStoreBuilder;
 import org.apache.kafka.test.MockTimestampExtractor;
 import org.apache.kafka.test.TestUtils;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 
 import java.io.File;
 import java.io.IOException;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
-import static java.util.Collections.singleton;
-import static org.hamcrest.CoreMatchers.equalTo;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static java.util.Arrays.asList;
+import static org.apache.kafka.common.metrics.Sensor.RecordingLevel.DEBUG;
+import static org.apache.kafka.common.utils.Utils.mkEntry;
+import static org.apache.kafka.common.utils.Utils.mkMap;
+import static org.apache.kafka.common.utils.Utils.mkProperties;
+import static org.apache.kafka.streams.processor.internals.Task.State.CREATED;
+import static org.apache.kafka.streams.processor.internals.Task.State.RUNNING;
+import static org.apache.kafka.streams.processor.internals.Task.State.SUSPENDED;
+import static org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.THREAD_ID_TAG;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+@ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.STRICT_STUBS)
 public class StandbyTaskTest {
 
-    private final TaskId taskId = new TaskId(0, 1);
+    private final String threadName = "threadName";
+    private final String threadId = Thread.currentThread().getName();
+    private final TaskId taskId = new TaskId(0, 0, "My-Topology");
 
-    private final Serializer<Integer> intSerializer = new IntegerSerializer();
-
-    private final String applicationId = "test-application";
     private final String storeName1 = "store1";
     private final String storeName2 = "store2";
-    private final String storeChangelogTopicName1 = ProcessorStateManager.storeChangelogTopic(applicationId, storeName1);
-    private final String storeChangelogTopicName2 = ProcessorStateManager.storeChangelogTopic(applicationId, storeName2);
-    private final String globalStoreName = "ktable1";
+    private final String applicationId = "test-application";
+    private final String storeChangelogTopicName1 = ProcessorStateManager.storeChangelogTopic(applicationId, storeName1, taskId.topologyName());
+    private final String storeChangelogTopicName2 = ProcessorStateManager.storeChangelogTopic(applicationId, storeName2, taskId.topologyName());
 
-    private final TopicPartition partition1 = new TopicPartition(storeChangelogTopicName1, 1);
-    private final TopicPartition partition2 = new TopicPartition(storeChangelogTopicName2, 1);
-    private final MockStateRestoreListener stateRestoreListener = new MockStateRestoreListener();
+    private final TopicPartition partition = new TopicPartition(storeChangelogTopicName1, 0);
+    private final MockKeyValueStore store1 = new MockKeyValueStoreBuilder(storeName1, false).build();
+    private final MockKeyValueStore store2 = new MockKeyValueStoreBuilder(storeName2, true).build();
 
-    private final Set<TopicPartition> topicPartitions = Collections.emptySet();
-    private final ProcessorTopology topology = ProcessorTopology.withLocalStores(
-            Utils.mkList(new MockStoreBuilder(storeName1, false).build(), new MockStoreBuilder(storeName2, true).build()),
-            new HashMap<String, String>() {
-                {
-                    put(storeName1, storeChangelogTopicName1);
-                    put(storeName2, storeChangelogTopicName2);
-                }
-            });
-    private final TopicPartition globalTopicPartition = new TopicPartition(globalStoreName, 0);
-    private final Set<TopicPartition> ktablePartitions = Utils.mkSet(globalTopicPartition);
-    private final ProcessorTopology ktableTopology = ProcessorTopology.withLocalStores(
-            Collections.singletonList(new MockStoreBuilder(globalTopicPartition.topic(), true).withLoggingDisabled().build()),
-            new HashMap<String, String>() {
-                {
-                    put(globalStoreName, globalTopicPartition.topic());
-                }
-            });
-
-    private File baseDir;
-    private StateDirectory stateDirectory;
-
-    private StreamsConfig createConfig(final File baseDir) throws IOException {
-        return new StreamsConfig(new Properties() {
-            {
-                setProperty(StreamsConfig.APPLICATION_ID_CONFIG, applicationId);
-                setProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:2171");
-                setProperty(StreamsConfig.BUFFERED_RECORDS_PER_PARTITION_CONFIG, "3");
-                setProperty(StreamsConfig.STATE_DIR_CONFIG, baseDir.getCanonicalPath());
-                setProperty(StreamsConfig.DEFAULT_TIMESTAMP_EXTRACTOR_CLASS_CONFIG, MockTimestampExtractor.class.getName());
-            }
-        });
-    }
-
-    private final MockConsumer<byte[], byte[]> consumer = new MockConsumer<>(OffsetResetStrategy.EARLIEST);
-    private final MockRestoreConsumer restoreStateConsumer = new MockRestoreConsumer();
-    private final StoreChangelogReader changelogReader = new StoreChangelogReader(
-        restoreStateConsumer,
-        Duration.ZERO,
-        stateRestoreListener,
-        new LogContext("standby-task-test ")
+    private final ProcessorTopology topology = ProcessorTopologyFactories.withLocalStores(
+        asList(store1, store2),
+        mkMap(mkEntry(storeName1, storeChangelogTopicName1), mkEntry(storeName2, storeChangelogTopicName2))
     );
 
-    private final byte[] recordValue = intSerializer.serialize(null, 10);
-    private final byte[] recordKey = intSerializer.serialize(null, 1);
+    private final MockTime time = new MockTime();
+    private final Metrics metrics = new Metrics(new MetricConfig().recordLevel(Sensor.RecordingLevel.DEBUG), time);
+    private final StreamsMetricsImpl streamsMetrics = new StreamsMetricsImpl(metrics, threadName, time);
 
-    @Before
-    public void setup() throws Exception {
-        restoreStateConsumer.reset();
-        restoreStateConsumer.updatePartitions(storeChangelogTopicName1, Utils.mkList(
-                new PartitionInfo(storeChangelogTopicName1, 0, Node.noNode(), new Node[0], new Node[0]),
-                new PartitionInfo(storeChangelogTopicName1, 1, Node.noNode(), new Node[0], new Node[0]),
-                new PartitionInfo(storeChangelogTopicName1, 2, Node.noNode(), new Node[0], new Node[0])
-        ));
+    private File baseDir;
+    private StreamsConfig config;
+    private StateDirectory stateDirectory;
+    private StandbyTask task;
 
-        restoreStateConsumer.updatePartitions(storeChangelogTopicName2, Utils.mkList(
-                new PartitionInfo(storeChangelogTopicName2, 0, Node.noNode(), new Node[0], new Node[0]),
-                new PartitionInfo(storeChangelogTopicName2, 1, Node.noNode(), new Node[0], new Node[0]),
-                new PartitionInfo(storeChangelogTopicName2, 2, Node.noNode(), new Node[0], new Node[0])
-        ));
-        baseDir = TestUtils.tempDirectory();
-        stateDirectory = new StateDirectory(createConfig(baseDir), new MockTime());
+    private StreamsConfig createConfig(final File baseDir) throws IOException {
+        return new StreamsConfig(mkProperties(mkMap(
+            mkEntry(StreamsConfig.APPLICATION_ID_CONFIG, applicationId),
+            mkEntry(StreamsConfig.METRICS_RECORDING_LEVEL_CONFIG, DEBUG.name),
+            mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:2171"),
+            mkEntry(StreamsConfig.BUFFERED_RECORDS_PER_PARTITION_CONFIG, "3"),
+            mkEntry(StreamsConfig.STATE_DIR_CONFIG, baseDir.getCanonicalPath()),
+            mkEntry(StreamsConfig.DEFAULT_TIMESTAMP_EXTRACTOR_CLASS_CONFIG, MockTimestampExtractor.class.getName())
+        )));
     }
 
-    @After
+    private final MockRestoreConsumer<Integer, Integer> restoreStateConsumer = new MockRestoreConsumer<>(
+        new IntegerSerializer(),
+        new IntegerSerializer()
+    );
+
+    @Mock
+    private ProcessorStateManager stateManager;
+
+    @BeforeEach
+    public void setup() throws Exception {
+        when(stateManager.taskId()).thenReturn(taskId);
+        when(stateManager.taskType()).thenReturn(TaskType.STANDBY);
+
+        restoreStateConsumer.reset();
+        restoreStateConsumer.updatePartitions(storeChangelogTopicName1, asList(
+            new PartitionInfo(storeChangelogTopicName1, 0, Node.noNode(), new Node[0], new Node[0]),
+            new PartitionInfo(storeChangelogTopicName1, 1, Node.noNode(), new Node[0], new Node[0]),
+            new PartitionInfo(storeChangelogTopicName1, 2, Node.noNode(), new Node[0], new Node[0])
+        ));
+
+        restoreStateConsumer.updatePartitions(storeChangelogTopicName2, asList(
+            new PartitionInfo(storeChangelogTopicName2, 0, Node.noNode(), new Node[0], new Node[0]),
+            new PartitionInfo(storeChangelogTopicName2, 1, Node.noNode(), new Node[0], new Node[0]),
+            new PartitionInfo(storeChangelogTopicName2, 2, Node.noNode(), new Node[0], new Node[0])
+        ));
+        baseDir = TestUtils.tempDirectory();
+        config = createConfig(baseDir);
+        stateDirectory = new StateDirectory(config, new MockTime(), true, true);
+    }
+
+    @AfterEach
     public void cleanup() throws IOException {
+        if (task != null) {
+            try {
+                task.suspend();
+            } catch (final IllegalStateException maybeSwallow) {
+                if (!maybeSwallow.getMessage().startsWith("Illegal state CLOSED while suspending standby task")) {
+                    throw maybeSwallow;
+                }
+            }
+            task.closeDirty();
+            task = null;
+        }
         Utils.delete(baseDir);
     }
 
     @Test
-    public void testStorePartitions() throws IOException {
-        StreamsConfig config = createConfig(baseDir);
-        StandbyTask task = new StandbyTask(taskId, topicPartitions, topology, consumer, changelogReader, config, null, stateDirectory);
-        task.initializeStateStores();
-        assertEquals(Utils.mkSet(partition2, partition1), new HashSet<>(task.checkpointedOffsets().keySet()));
+    public void shouldThrowLockExceptionIfFailedToLockStateDirectory() {
+        stateDirectory = mock(StateDirectory.class);
+        when(stateDirectory.lock(taskId)).thenReturn(false);
+        when(stateManager.taskType()).thenReturn(TaskType.STANDBY);
+
+        task = createStandbyTask();
+
+        assertThrows(LockException.class, () -> task.initializeIfNeeded());
+        task = null;
     }
 
-    @SuppressWarnings("unchecked")
-    @Test(expected = ProcessorStateException.class)
-    public void testUpdateNonPersistentStore() throws IOException {
-        StreamsConfig config = createConfig(baseDir);
-        StandbyTask task = new StandbyTask(taskId, topicPartitions, topology, consumer, changelogReader, config, null, stateDirectory);
+    @Test
+    public void shouldTransitToRunningAfterInitialization() {
+        doNothing().when(stateManager).registerStateStores(any(), any());
 
-        restoreStateConsumer.assign(new ArrayList<>(task.checkpointedOffsets().keySet()));
+        task = createStandbyTask();
 
-        task.update(partition1,
-                records(new ConsumerRecord<>(partition1.topic(), partition1.partition(), 10, 0L, TimestampType.CREATE_TIME, 0L, 0, 0, recordKey, recordValue))
+        assertEquals(CREATED, task.state());
+
+        task.initializeIfNeeded();
+
+        assertEquals(RUNNING, task.state());
+
+        // initialize should be idempotent
+        task.initializeIfNeeded();
+
+        assertEquals(RUNNING, task.state());
+    }
+
+    @Test
+    public void shouldThrowIfCommittingOnIllegalState() {
+        task = createStandbyTask();
+        task.suspend();
+        task.closeClean();
+
+        assertThrows(IllegalStateException.class, () -> task.prepareCommit(true));
+    }
+
+    @Test
+    public void shouldAlwaysCommitStateIfEnforced() {
+        task = createStandbyTask();
+
+        task.initializeIfNeeded();
+        task.maybeCheckpoint();
+
+        verify(stateManager).commit();
+    }
+
+    @Test
+    public void shouldReturnStateManagerChangelogOffsets() {
+        when(stateManager.changelogOffsets()).thenReturn(Collections.singletonMap(partition, 50L));
+
+        task = createStandbyTask();
+
+        assertEquals(Collections.singletonMap(partition, 50L), task.changelogOffsets());
+    }
+
+    @Test
+    public void shouldNotCommitAndThrowOnCloseDirty() {
+        doThrow(new ProcessorStateException("KABOOM!")).when(stateManager).close();
+        final MetricName metricName = setupCloseTaskMetric();
+
+        task = createStandbyTask();
+        task.initializeIfNeeded();
+        task.suspend();
+        task.closeDirty();
+
+        assertEquals(Task.State.CLOSED, task.state());
+
+        final double expectedCloseTaskMetric = 1.0;
+        verifyCloseTaskMetric(expectedCloseTaskMetric, streamsMetrics, metricName);
+
+        verify(stateManager, never()).commit();
+    }
+
+    @Test
+    public void shouldNotThrowFromStateManagerCloseInCloseDirty() {
+        doThrow(new RuntimeException("KABOOM!")).when(stateManager).close();
+
+        task = createStandbyTask();
+        task.initializeIfNeeded();
+
+        task.suspend();
+        task.closeDirty();
+    }
+
+    @Test
+    public void shouldSuspendAndCommitBeforeCloseClean() {
+        doNothing().when(stateManager).close();
+        final MetricName metricName = setupCloseTaskMetric();
+
+        task = createStandbyTask();
+        task.initializeIfNeeded();
+        task.suspend();
+        task.prepareCommit(true);
+        task.postCommit(true);
+        task.closeClean();
+
+        assertEquals(Task.State.CLOSED, task.state());
+
+        final double expectedCloseTaskMetric = 1.0;
+        verifyCloseTaskMetric(expectedCloseTaskMetric, streamsMetrics, metricName);
+        verify(stateManager).commit();
+    }
+
+    @Test
+    public void shouldRequireSuspendingCreatedTasksBeforeClose() {
+        task = createStandbyTask();
+        assertEquals(CREATED, task.state());
+        assertThrows(IllegalStateException.class, () -> task.closeClean());
+
+        task.suspend();
+        task.closeClean();
+    }
+
+    @Test
+    public void shouldThrowOnCloseCleanError() {
+        doThrow(new RuntimeException("KABOOM!")).when(stateManager).close();
+        final MetricName metricName = setupCloseTaskMetric();
+
+        task = createStandbyTask();
+        task.initializeIfNeeded();
+
+        task.suspend();
+        assertThrows(RuntimeException.class, () -> task.closeClean());
+
+        final double expectedCloseTaskMetric = 0.0;
+        verifyCloseTaskMetric(expectedCloseTaskMetric, streamsMetrics, metricName);
+    }
+
+    @Test
+    public void shouldThrowOnCloseCleanCommitError() {
+        doThrow(new RuntimeException("KABOOM!")).when(stateManager).commit();
+        final MetricName metricName = setupCloseTaskMetric();
+
+        task = createStandbyTask();
+        task.initializeIfNeeded();
+
+        task.prepareCommit(true);
+        assertThrows(RuntimeException.class, () -> task.postCommit(true));
+
+        assertEquals(RUNNING, task.state());
+
+        final double expectedCloseTaskMetric = 0.0;
+        verifyCloseTaskMetric(expectedCloseTaskMetric, streamsMetrics, metricName);
+    }
+
+    @Test
+    public void shouldUnregisterMetricsInCloseClean() {
+        task = createStandbyTask();
+        task.initializeIfNeeded();
+
+        task.suspend();
+        task.closeClean();
+        // Currently, there are no metrics registered for standby tasks.
+        // This is a regression test so that, if we add some, we will be sure to deregister them.
+        assertTrue(getTaskMetrics().isEmpty());
+    }
+
+    @Test
+    public void shouldUnregisterMetricsInCloseDirty() {
+        task = createStandbyTask();
+        task.initializeIfNeeded();
+
+        task.suspend();
+        task.closeDirty();
+
+        // Currently, there are no metrics registered for standby tasks.
+        // This is a regression test so that, if we add some, we will be sure to deregister them.
+        assertTrue(getTaskMetrics().isEmpty());
+    }
+
+    @Test
+    public void shouldCloseStateManagerOnTaskCreated() {
+        doNothing().when(stateManager).close();
+
+        final MetricName metricName = setupCloseTaskMetric();
+
+        task = createStandbyTask();
+        task.suspend();
+
+        task.closeDirty();
+
+        final double expectedCloseTaskMetric = 1.0;
+        verifyCloseTaskMetric(expectedCloseTaskMetric, streamsMetrics, metricName);
+
+        assertEquals(Task.State.CLOSED, task.state());
+    }
+
+    @Test
+    public void shouldDeleteStateDirOnTaskCreatedAndEosV2UncleanClose() {
+        doNothing().when(stateManager).close();
+
+        when(stateManager.baseDir()).thenReturn(baseDir);
+
+        final MetricName metricName = setupCloseTaskMetric();
+
+        config = new StreamsConfig(mkProperties(mkMap(
+            mkEntry(StreamsConfig.APPLICATION_ID_CONFIG, applicationId),
+            mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:2171"),
+            mkEntry(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2)
+        )));
+
+        task = createStandbyTask();
+
+        task.suspend();
+        task.closeDirty();
+
+        final double expectedCloseTaskMetric = 1.0;
+        verifyCloseTaskMetric(expectedCloseTaskMetric, streamsMetrics, metricName);
+
+        assertEquals(Task.State.CLOSED, task.state());
+    }
+
+    @Test
+    public void shouldNotWipeStateDirOnDirtyCloseWithEosAndTransactionalStateStores() {
+        doNothing().when(stateManager).close();
+        when(stateManager.hasCorruptedStores()).thenReturn(false);
+
+        config = new StreamsConfig(mkProperties(mkMap(
+            mkEntry(StreamsConfig.APPLICATION_ID_CONFIG, applicationId),
+            mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:2171"),
+            mkEntry(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2),
+            mkEntry(StreamsConfig.TRANSACTIONAL_STATE_STORES_CONFIG, "true")
+        )));
+
+        task = createStandbyTask();
+
+        task.suspend();
+        task.closeDirty();
+
+        assertEquals(Task.State.CLOSED, task.state());
+        // With transactional state stores, the state dir should NOT be wiped on dirty close
+        // unless stores are specifically marked as corrupted.
+        verify(stateManager, never()).baseDir();
+    }
+
+    @Test
+    public void shouldPrepareRecycleSuspendedTask() {
+        task = createStandbyTask();
+        assertThrows(IllegalStateException.class, () -> task.prepareRecycle()); // CREATED
+
+        task.initializeIfNeeded();
+        assertThrows(IllegalStateException.class, () -> task.prepareRecycle()); // RUNNING
+
+        task.suspend();
+        task.prepareRecycle(); // SUSPENDED
+        assertEquals(Task.State.CLOSED, task.state());
+
+        // Currently, there are no metrics registered for standby tasks.
+        // This is a regression test so that, if we add some, we will be sure to deregister them.
+        assertTrue(getTaskMetrics().isEmpty());
+
+        verify(stateManager).recycle();
+    }
+
+    @Test
+    public void shouldAlwaysSuspendCreatedTasks() {
+        task = createStandbyTask();
+        assertEquals(CREATED, task.state());
+        task.suspend();
+        assertEquals(SUSPENDED, task.state());
+    }
+
+    @Test
+    public void shouldAlwaysSuspendRunningTasks() {
+        task = createStandbyTask();
+        task.initializeIfNeeded();
+        assertEquals(RUNNING, task.state());
+        task.suspend();
+        assertEquals(SUSPENDED, task.state());
+    }
+
+    @Test
+    public void shouldInitTaskTimeoutAndEventuallyThrow() {
+        task = createStandbyTask();
+
+        task.maybeInitTaskTimeoutOrThrow(0L, null);
+        task.maybeInitTaskTimeoutOrThrow(Duration.ofMinutes(5).toMillis(), null);
+
+        final StreamsException thrown = assertThrows(
+            StreamsException.class,
+            () -> task.maybeInitTaskTimeoutOrThrow(Duration.ofMinutes(5).plus(Duration.ofMillis(1L)).toMillis(), null)
         );
 
+        assertInstanceOf(TimeoutException.class, thrown.getCause());
+
     }
 
     @Test
-    public void testUpdate() throws IOException {
-        StreamsConfig config = createConfig(baseDir);
-        StandbyTask task = new StandbyTask(taskId, topicPartitions, topology, consumer, changelogReader, config, null, stateDirectory);
-        task.initializeStateStores();
-        final Set<TopicPartition> partition = Collections.singleton(partition2);
-        restoreStateConsumer.assign(partition);
+    public void shouldClearTaskTimeout() {
+        task = createStandbyTask();
 
-        for (ConsumerRecord<Integer, Integer> record : Arrays.asList(
-                new ConsumerRecord<>(partition2.topic(), partition2.partition(), 10, 0L, TimestampType.CREATE_TIME, 0L, 0, 0, 1, 100),
-                new ConsumerRecord<>(partition2.topic(), partition2.partition(), 20, 0L, TimestampType.CREATE_TIME, 0L, 0, 0, 2, 100),
-                new ConsumerRecord<>(partition2.topic(), partition2.partition(), 30, 0L, TimestampType.CREATE_TIME, 0L, 0, 0, 3, 100))) {
-            restoreStateConsumer.bufferRecord(record);
-        }
-
-        restoreStateConsumer.seekToBeginning(partition);
-        task.update(partition2, restoreStateConsumer.poll(Duration.ofMillis(100)).records(partition2));
-
-        StandbyContextImpl context = (StandbyContextImpl) task.context();
-        MockStateStore store1 = (MockStateStore) context.getStateMgr().getStore(storeName1);
-        MockStateStore store2 = (MockStateStore) context.getStateMgr().getStore(storeName2);
-
-        assertEquals(Collections.emptyList(), store1.keys);
-        assertEquals(Utils.mkList(1, 2, 3), store2.keys);
-
-        task.closeStateManager(true);
-
-        File taskDir = stateDirectory.directoryForTask(taskId);
-        OffsetCheckpoint checkpoint = new OffsetCheckpoint(new File(taskDir, ProcessorStateManager.CHECKPOINT_FILE_NAME));
-        Map<TopicPartition, Long> offsets = checkpoint.read();
-
-        assertEquals(1, offsets.size());
-        assertEquals(new Long(30L + 1L), offsets.get(partition2));
+        task.maybeInitTaskTimeoutOrThrow(0L, null);
+        task.clearTaskTimeout();
+        task.maybeInitTaskTimeoutOrThrow(Duration.ofMinutes(5).plus(Duration.ofMillis(1L)).toMillis(), null);
     }
 
     @Test
-    public void testUpdateKTable() throws IOException {
-        consumer.assign(Utils.mkList(globalTopicPartition));
-        Map<TopicPartition, OffsetAndMetadata> committedOffsets = new HashMap<>();
-        committedOffsets.put(new TopicPartition(globalTopicPartition.topic(), globalTopicPartition.partition()), new OffsetAndMetadata(0L));
-        consumer.commitSync(committedOffsets);
+    public void shouldRecordRestoredRecords() {
+        task = createStandbyTask();
 
-        restoreStateConsumer.updatePartitions(globalStoreName, Utils.mkList(
-                new PartitionInfo(globalStoreName, 0, Node.noNode(), new Node[0], new Node[0]),
-                new PartitionInfo(globalStoreName, 1, Node.noNode(), new Node[0], new Node[0]),
-                new PartitionInfo(globalStoreName, 2, Node.noNode(), new Node[0], new Node[0])
+        final KafkaMetric totalMetric = getMetric("update", "%s-total", task.id().toString());
+        final KafkaMetric rateMetric = getMetric("update", "%s-rate", task.id().toString());
+
+        assertEquals(0.0, totalMetric.metricValue());
+        assertEquals(0.0, rateMetric.metricValue());
+
+        // standby tasks have no remaining-records metric, so the offset-slot argument is ignored
+        task.recordRestoration(time, 25L, 30L, false);
+
+        assertEquals(25.0, totalMetric.metricValue());
+        // the rate measures updated records per second, not update batches per second; with no time
+        // elapsed the rate window is (metrics.num.samples - 1) * metrics.sample.window.ms == 30s
+        assertEquals(
+            25.0 / 30.0,
+            ((Number) rateMetric.metricValue()).doubleValue(),
+            0.0001d,
+            "update-rate must measure updated records per second, not update batches per second; "
+                + "counting batches would give 1/30 == 0.03333 (KAFKA-20877)"
+        );
+
+        task.recordRestoration(time, 50L, 55L, false);
+
+        assertEquals(75.0, totalMetric.metricValue());
+        assertEquals(
+            75.0 / 30.0,
+            ((Number) rateMetric.metricValue()).doubleValue(),
+            0.0001d,
+            "update-rate must measure updated records per second, not update batches per second; "
+                + "counting batches would give 2/30 == 0.06666 (KAFKA-20877)"
+        );
+    }
+
+    private KafkaMetric getMetric(final String operation,
+                                  final String nameFormat,
+                                  final String taskId) {
+        final String descriptionIsNotVerified = "";
+        return metrics.metrics().get(metrics.metricName(
+            String.format(nameFormat, operation),
+            "stream-task-metrics",
+            descriptionIsNotVerified,
+            mkMap(
+                mkEntry("task-id", taskId),
+                mkEntry(THREAD_ID_TAG, Thread.currentThread().getName())
+            )
         ));
-
-        StreamsConfig config = createConfig(baseDir);
-        StandbyTask task = new StandbyTask(taskId, ktablePartitions, ktableTopology, consumer, changelogReader, config, null, stateDirectory);
-        task.initializeStateStores();
-        restoreStateConsumer.assign(new ArrayList<>(task.checkpointedOffsets().keySet()));
-
-        for (ConsumerRecord<Integer, Integer> record : Arrays.asList(
-                new ConsumerRecord<>(globalTopicPartition.topic(), globalTopicPartition.partition(), 10, 0L, TimestampType.CREATE_TIME, 0L, 0, 0, 1, 100),
-                new ConsumerRecord<>(globalTopicPartition.topic(), globalTopicPartition.partition(), 20, 0L, TimestampType.CREATE_TIME, 0L, 0, 0, 2, 100),
-                new ConsumerRecord<>(globalTopicPartition.topic(), globalTopicPartition.partition(), 30, 0L, TimestampType.CREATE_TIME, 0L, 0, 0, 3, 100),
-                new ConsumerRecord<>(globalTopicPartition.topic(), globalTopicPartition.partition(), 40, 0L, TimestampType.CREATE_TIME, 0L, 0, 0, 4, 100),
-                new ConsumerRecord<>(globalTopicPartition.topic(), globalTopicPartition.partition(), 50, 0L, TimestampType.CREATE_TIME, 0L, 0, 0, 5, 100))) {
-            restoreStateConsumer.bufferRecord(record);
-        }
-
-        for (Map.Entry<TopicPartition, Long> entry : task.checkpointedOffsets().entrySet()) {
-            TopicPartition partition = entry.getKey();
-            long offset = entry.getValue();
-            if (offset >= 0) {
-                restoreStateConsumer.seek(partition, offset);
-            } else {
-                restoreStateConsumer.seekToBeginning(singleton(partition));
-            }
-        }
-
-        // The commit offset is at 0L. Records should not be processed
-        List<ConsumerRecord<byte[], byte[]>> remaining = task.update(globalTopicPartition, restoreStateConsumer.poll(Duration.ofMillis(100)).records(globalTopicPartition));
-        assertEquals(5, remaining.size());
-
-        committedOffsets.put(new TopicPartition(globalTopicPartition.topic(), globalTopicPartition.partition()), new OffsetAndMetadata(10L));
-        consumer.commitSync(committedOffsets);
-        task.commit(); // update offset limits
-
-        // The commit offset has not reached, yet.
-        remaining = task.update(globalTopicPartition, remaining);
-        assertEquals(5, remaining.size());
-
-        committedOffsets.put(new TopicPartition(globalTopicPartition.topic(), globalTopicPartition.partition()), new OffsetAndMetadata(11L));
-        consumer.commitSync(committedOffsets);
-        task.commit(); // update offset limits
-
-        // one record should be processed.
-        remaining = task.update(globalTopicPartition, remaining);
-        assertEquals(4, remaining.size());
-
-        committedOffsets.put(new TopicPartition(globalTopicPartition.topic(), globalTopicPartition.partition()), new OffsetAndMetadata(45L));
-        consumer.commitSync(committedOffsets);
-        task.commit(); // update offset limits
-
-        // The commit offset is now 45. All record except for the last one should be processed.
-        remaining = task.update(globalTopicPartition, remaining);
-        assertEquals(1, remaining.size());
-
-        committedOffsets.put(new TopicPartition(globalTopicPartition.topic(), globalTopicPartition.partition()), new OffsetAndMetadata(50L));
-        consumer.commitSync(committedOffsets);
-        task.commit(); // update offset limits
-
-        // The commit offset is now 50. Still the last record remains.
-        remaining = task.update(globalTopicPartition, remaining);
-        assertEquals(1, remaining.size());
-
-        committedOffsets.put(new TopicPartition(globalTopicPartition.topic(), globalTopicPartition.partition()), new OffsetAndMetadata(60L));
-        consumer.commitSync(committedOffsets);
-        task.commit(); // update offset limits
-
-        // The commit offset is now 60. No record should be left.
-        remaining = task.update(globalTopicPartition, remaining);
-        assertNull(remaining);
-
-        task.closeStateManager(true);
-
-        File taskDir = stateDirectory.directoryForTask(taskId);
-        OffsetCheckpoint checkpoint = new OffsetCheckpoint(new File(taskDir, ProcessorStateManager.CHECKPOINT_FILE_NAME));
-        Map<TopicPartition, Long> offsets = checkpoint.read();
-
-        assertEquals(1, offsets.size());
-        assertEquals(new Long(51L), offsets.get(globalTopicPartition));
-
     }
 
-    @Test
-    public void shouldNotThrowUnsupportedOperationExceptionWhenInitializingStateStores() throws IOException {
-        final String changelogName = "test-application-my-store-changelog";
-        final List<TopicPartition> partitions = Utils.mkList(new TopicPartition(changelogName, 0));
-        consumer.assign(partitions);
-        final Map<TopicPartition, OffsetAndMetadata> committedOffsets = new HashMap<>();
-        committedOffsets.put(new TopicPartition(changelogName, 0), new OffsetAndMetadata(0L));
-        consumer.commitSync(committedOffsets);
+    private StandbyTask createStandbyTask() {
 
-        restoreStateConsumer.updatePartitions(changelogName, Utils.mkList(
-                new PartitionInfo(changelogName, 0, Node.noNode(), new Node[0], new Node[0])));
-        final InternalStreamsBuilder builder = new InternalStreamsBuilder(new InternalTopologyBuilder());
-        builder.stream(Collections.singleton("topic"), new ConsumedInternal<>()).groupByKey().count();
-
-        final StreamsConfig config = createConfig(baseDir);
-        final InternalTopologyBuilder internalTopologyBuilder = InternalStreamsBuilderTest.internalTopologyBuilder(builder);
-        final ProcessorTopology topology = internalTopologyBuilder.setApplicationId(applicationId).build(0);
-
-        new StandbyTask(taskId, partitions, topology, consumer, changelogReader, config,
-            new MockStreamsMetrics(new Metrics()), stateDirectory);
-    }
-
-    @Test
-    public void shouldCheckpointStoreOffsetsOnCommit() throws IOException {
-        consumer.assign(Utils.mkList(globalTopicPartition));
-        final Map<TopicPartition, OffsetAndMetadata> committedOffsets = new HashMap<>();
-        committedOffsets.put(new TopicPartition(globalTopicPartition.topic(), globalTopicPartition.partition()), new OffsetAndMetadata(100L));
-        consumer.commitSync(committedOffsets);
-
-        restoreStateConsumer.updatePartitions(globalStoreName, Utils.mkList(
-                new PartitionInfo(globalStoreName, 0, Node.noNode(), new Node[0], new Node[0])));
-
-        final TaskId taskId = new TaskId(0, 0);
-        final MockTime time = new MockTime();
-        final StreamsConfig config = createConfig(baseDir);
-        final StandbyTask task = new StandbyTask(taskId,
-                                                 ktablePartitions,
-                                                 ktableTopology,
-                                                 consumer,
-                                                 changelogReader,
-                                                 config,
-                                                 null,
-                                                 stateDirectory
+        final ThreadCache cache = new ThreadCache(
+            new LogContext(String.format("stream-thread [%s] ", Thread.currentThread().getName())),
+            0,
+            streamsMetrics
         );
-        task.initializeStateStores();
 
-        restoreStateConsumer.assign(new ArrayList<>(task.checkpointedOffsets().keySet()));
+        final InternalProcessorContext<?, ?> context = new ProcessorContextImpl(
+            taskId,
+            config,
+            stateManager,
+            streamsMetrics,
+            cache
+        );
 
-        final byte[] serializedValue = Serdes.Integer().serializer().serialize("", 1);
-        task.update(globalTopicPartition, Collections.singletonList(new ConsumerRecord<>(globalTopicPartition.topic(),
-                                                                           globalTopicPartition.partition(),
-                                                                           50L,
-                                                                           serializedValue,
-                                                                           serializedValue)));
-
-        time.sleep(config.getLong(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG));
-        task.commit();
-
-        final Map<TopicPartition, Long> checkpoint = new OffsetCheckpoint(new File(stateDirectory.directoryForTask(taskId),
-                                                                                   ProcessorStateManager.CHECKPOINT_FILE_NAME)).read();
-        assertThat(checkpoint, equalTo(Collections.singletonMap(globalTopicPartition, 51L)));
-
+        return new StandbyTask(
+            taskId,
+            Collections.singleton(partition),
+            topology,
+            new TopologyConfig(config).getTaskConfig(),
+            streamsMetrics,
+            stateManager,
+            stateDirectory,
+            cache,
+            context);
     }
 
-    @Test
-    public void shouldCloseStateMangerOnTaskCloseWhenCommitFailed() throws Exception {
-        consumer.assign(Utils.mkList(globalTopicPartition));
-        final Map<TopicPartition, OffsetAndMetadata> committedOffsets = new HashMap<>();
-        committedOffsets.put(new TopicPartition(globalTopicPartition.topic(), globalTopicPartition.partition()), new OffsetAndMetadata(100L));
-        consumer.commitSync(committedOffsets);
-
-        restoreStateConsumer.updatePartitions(globalStoreName, Utils.mkList(
-                new PartitionInfo(globalStoreName, 0, Node.noNode(), new Node[0], new Node[0])));
-
-        final StreamsConfig config = createConfig(baseDir);
-        final AtomicBoolean closedStateManager = new AtomicBoolean(false);
-        final StandbyTask task = new StandbyTask(taskId,
-                                                 ktablePartitions,
-                                                 ktableTopology,
-                                                 consumer,
-                                                 changelogReader,
-                                                 config,
-                                                 null,
-                                                 stateDirectory
-        ) {
-            @Override
-            public void commit() {
-                throw new RuntimeException("KABOOM!");
-            }
-
-            @Override
-            void closeStateManager(final boolean writeCheckpoint) throws ProcessorStateException {
-                closedStateManager.set(true);
-            }
-        };
-        task.initializeStateStores();
-        try {
-            task.close(true, false);
-            fail("should have thrown exception");
-        } catch (Exception e) {
-            // expected
-        }
-        assertTrue(closedStateManager.get());
+    private MetricName setupCloseTaskMetric() {
+        final MetricName metricName = new MetricName("name", "group", "description", Collections.emptyMap());
+        final Sensor sensor = streamsMetrics.threadLevelSensor(threadId, "task-closed", Sensor.RecordingLevel.INFO);
+        sensor.add(metricName, new CumulativeSum());
+        return metricName;
     }
 
-    private List<ConsumerRecord<byte[], byte[]>> records(ConsumerRecord<byte[], byte[]>... recs) {
-        return Arrays.asList(recs);
+    private void verifyCloseTaskMetric(final double expected, final StreamsMetricsImpl streamsMetrics, final MetricName metricName) {
+        final KafkaMetric metric = (KafkaMetric) streamsMetrics.metrics().get(metricName);
+        final double totalCloses = metric.measurable().measure(metric.config(), System.currentTimeMillis());
+        assertEquals(expected, totalCloses);
+    }
+
+    private List<MetricName> getTaskMetrics() {
+        return streamsMetrics.metrics().keySet().stream().filter(m -> m.tags().containsKey("task-id")).collect(Collectors.toList());
     }
 }

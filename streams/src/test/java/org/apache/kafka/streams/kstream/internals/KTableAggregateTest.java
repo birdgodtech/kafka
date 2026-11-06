@@ -16,239 +16,300 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
+import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeader;
+import org.apache.kafka.common.header.internals.RecordHeaders;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.serialization.LongDeserializer;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.common.serialization.Serializer;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.Bytes;
-import org.apache.kafka.common.utils.Utils;
-import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.KeyValueTimestamp;
 import org.apache.kafka.streams.StreamsBuilder;
-import org.apache.kafka.streams.integration.utils.EmbeddedKafkaCluster;
-import org.apache.kafka.streams.kstream.Aggregator;
-import org.apache.kafka.streams.kstream.ForeachAction;
-import org.apache.kafka.streams.kstream.Initializer;
+import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.TestInputTopic;
+import org.apache.kafka.streams.TestOutputTopic;
+import org.apache.kafka.streams.TopologyConfig;
+import org.apache.kafka.streams.TopologyTestDriver;
+import org.apache.kafka.streams.TopologyTestDriverBuilder;
+import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.streams.kstream.Grouped;
 import org.apache.kafka.streams.kstream.KTable;
 import org.apache.kafka.streams.kstream.KeyValueMapper;
 import org.apache.kafka.streams.kstream.Materialized;
-import org.apache.kafka.streams.kstream.Reducer;
-import org.apache.kafka.streams.kstream.Serialized;
-import org.apache.kafka.streams.kstream.ValueJoiner;
-import org.apache.kafka.streams.kstream.ValueMapper;
+import org.apache.kafka.streams.state.BuiltInDslStoreSuppliers;
 import org.apache.kafka.streams.state.KeyValueStore;
-import org.apache.kafka.test.KStreamTestDriver;
+import org.apache.kafka.streams.state.Stores;
+import org.apache.kafka.streams.test.TestRecord;
 import org.apache.kafka.test.MockAggregator;
+import org.apache.kafka.test.MockApiProcessor;
+import org.apache.kafka.test.MockApiProcessorSupplier;
 import org.apache.kafka.test.MockInitializer;
 import org.apache.kafka.test.MockMapper;
-import org.apache.kafka.test.MockProcessor;
-import org.apache.kafka.test.MockProcessorSupplier;
+import org.apache.kafka.test.StreamsTestUtils;
 import org.apache.kafka.test.TestUtils;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
 
-import java.io.File;
-import java.util.HashMap;
-import java.util.Map;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
-import static org.junit.Assert.assertEquals;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Properties;
+
+import static java.util.Arrays.asList;
+import static org.apache.kafka.common.utils.Utils.mkEntry;
+import static org.apache.kafka.common.utils.Utils.mkMap;
+import static org.apache.kafka.common.utils.Utils.mkProperties;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 
 public class KTableAggregateTest {
-
     private final Serde<String> stringSerde = Serdes.String();
     private final Consumed<String, String> consumed = Consumed.with(stringSerde, stringSerde);
-    private final Serialized<String, String> stringSerialzied = Serialized.with(stringSerde, stringSerde);
-    private final MockProcessorSupplier<String, Object> supplier = new MockProcessorSupplier<>();
+    private final Grouped<String, String> stringSerialized = Grouped.with(stringSerde, stringSerde);
+    private final MockApiProcessorSupplier<String, Object, Void, Void> supplier = new MockApiProcessorSupplier<>();
+    private static final Properties CONFIG = mkProperties(mkMap(
+        mkEntry(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory("kafka-test").getAbsolutePath())));
 
-    private File stateDir = null;
-
-    @Rule
-    public EmbeddedKafkaCluster cluster = null;
-    @Rule
-    public final KStreamTestDriver driver = new KStreamTestDriver();
-
-    @Before
-    public void setUp() {
-        stateDir = TestUtils.tempDirectory("kafka-test");
+    private StreamsBuilder createStreamBuilderInMemory(final boolean withHeaders) {
+        final Properties props = StreamsTestUtils.getStreamsConfig(Serdes.String(), Serdes.String());
+        props.put(StreamsConfig.DSL_STORE_SUPPLIERS_CLASS_CONFIG,
+                    BuiltInDslStoreSuppliers.InMemoryDslStoreSuppliers.class.getName());
+        StreamsTestUtils.maybeSetDslStoreFormatHeaders(props, withHeaders);
+        return new StreamsBuilder(new TopologyConfig(new StreamsConfig(props)));
     }
 
-    @Test
-    public void testAggBasic() {
-        final StreamsBuilder builder = new StreamsBuilder();
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    public void testAggBasic(final boolean withHeaders) {
+        final StreamsBuilder builder = createStreamBuilderInMemory(withHeaders);
         final String topic1 = "topic1";
 
-
-        KTable<String, String> table1 = builder.table(topic1, consumed);
-        KTable<String, String> table2 = table1.groupBy(MockMapper.<String, String>noOpKeyValueMapper(),
-                                                       stringSerialzied
-        ).aggregate(MockInitializer.STRING_INIT,
+        final KTable<String, String> table1 = builder.table(topic1, consumed);
+        final KTable<String, String> table2 = table1
+            .groupBy(
+                MockMapper.noOpKeyValueMapper(),
+                stringSerialized)
+            .aggregate(
+                MockInitializer.STRING_INIT,
                 MockAggregator.TOSTRING_ADDER,
                 MockAggregator.TOSTRING_REMOVER,
-                Materialized.<String, String, KeyValueStore<Bytes, byte[]>>as("topic1-Canonized").withValueSerde(stringSerde));
+                Materialized.<String, String, KeyValueStore<Bytes, byte[]>>as("topic1-Canonized")
+                    .withValueSerde(stringSerde));
 
         table2.toStream().process(supplier);
 
-        driver.setUp(builder, stateDir, Serdes.String(), Serdes.String());
+        try (
+            final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build())
+                .withConfig(CONFIG)
+                .withInitialWallClockTime(Instant.ofEpochMilli(0L)).build()) {
+            final TestInputTopic<String, String> inputTopic =
+                driver.createInputTopic(topic1, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
 
-        driver.process(topic1, "A", "1");
-        driver.flushState();
-        driver.process(topic1, "B", "2");
-        driver.flushState();
-        driver.process(topic1, "A", "3");
-        driver.flushState();
-        driver.process(topic1, "B", "4");
-        driver.flushState();
-        driver.process(topic1, "C", "5");
-        driver.flushState();
-        driver.process(topic1, "D", "6");
-        driver.flushState();
-        driver.process(topic1, "B", "7");
-        driver.flushState();
-        driver.process(topic1, "C", "8");
-        driver.flushState();
+            final Headers headers = new RecordHeaders();
+            headers.add(new RecordHeader("header-key",  "header-value".getBytes(StandardCharsets.UTF_8)));
+            inputTopic.pipeInput(new TestRecord<>("A", "1", headers, 10L));
+            inputTopic.pipeInput("B", "2", 15L);
+            inputTopic.pipeInput("A", "3", 20L);
+            inputTopic.pipeInput("B", "4", 18L);
+            inputTopic.pipeInput("C", "5", 5L);
+            inputTopic.pipeInput("D", "6", 25L);
+            inputTopic.pipeInput("B", "7", 15L);
+            inputTopic.pipeInput("C", "8", 10L);
 
-        assertEquals(Utils.mkList(
-                "A:0+1",
-                "B:0+2",
-                "A:0+1-1+3",
-                "B:0+2-2+4",
-                "C:0+5",
-                "D:0+6",
-                "B:0+2-2+4-4+7",
-                "C:0+5-5+8"), supplier.theCapturedProcessor().processed);
+            assertEquals(
+                asList(
+                    new KeyValueTimestamp<>("A", "0+1", 10L),
+                    new KeyValueTimestamp<>("B", "0+2", 15L),
+                    new KeyValueTimestamp<>("A", "0+1-1+3", 20L),
+                    new KeyValueTimestamp<>("B", "0+2-2+4", 18L),
+                    new KeyValueTimestamp<>("C", "0+5", 5L),
+                    new KeyValueTimestamp<>("D", "0+6", 25L),
+                    new KeyValueTimestamp<>("B", "0+2-2+4-4+7", 18L),
+                    new KeyValueTimestamp<>("C", "0+5-5+8", 10L)),
+                supplier.theCapturedProcessor().processed());
+        }
     }
 
-
-    @Test
-    public void testAggCoalesced() {
-        final StreamsBuilder builder = new StreamsBuilder();
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    public void testAggRepartition(final boolean withHeaders) {
+        final StreamsBuilder builder = createStreamBuilderInMemory(withHeaders);
         final String topic1 = "topic1";
 
-        KTable<String, String> table1 = builder.table(topic1, consumed);
-        KTable<String, String> table2 = table1.groupBy(MockMapper.<String, String>noOpKeyValueMapper(),
-                                                       stringSerialzied
-        ).aggregate(MockInitializer.STRING_INIT,
-            MockAggregator.TOSTRING_ADDER,
-            MockAggregator.TOSTRING_REMOVER,
-            Materialized.<String, String, KeyValueStore<Bytes, byte[]>>as("topic1-Canonized").withValueSerde(stringSerde));
-
-        table2.toStream().process(supplier);
-
-        driver.setUp(builder, stateDir);
-
-        driver.process(topic1, "A", "1");
-        driver.process(topic1, "A", "3");
-        driver.process(topic1, "A", "4");
-        driver.flushState();
-        assertEquals(Utils.mkList(
-            "A:0+4"), supplier.theCapturedProcessor().processed);
-    }
-
-
-    @Test
-    public void testAggRepartition() {
-        final StreamsBuilder builder = new StreamsBuilder();
-        final String topic1 = "topic1";
-
-        KTable<String, String> table1 = builder.table(topic1, consumed);
-        KTable<String, String> table2 = table1.groupBy(new KeyValueMapper<String, String, KeyValue<String, String>>() {
-            @Override
-                public KeyValue<String, String> apply(String key, String value) {
-                switch (key) {
-                    case "null":
-                        return KeyValue.pair(null, value);
-                    case "NULL":
-                        return null;
-                    default:
-                        return KeyValue.pair(value, value);
-                }
-                }
-            },
-                stringSerialzied
-        )
-                .aggregate(MockInitializer.STRING_INIT,
+        final KTable<String, String> table1 = builder.table(topic1, consumed);
+        final KTable<String, String> table2 = table1
+            .groupBy(
+                (key, value) -> {
+                    switch (key) {
+                        case "null":
+                            return KeyValue.pair(null, value);
+                        case "NULL":
+                            return null;
+                        default:
+                            return KeyValue.pair(value, value);
+                    }
+                },
+                stringSerialized)
+            .aggregate(
+                MockInitializer.STRING_INIT,
                 MockAggregator.TOSTRING_ADDER,
                 MockAggregator.TOSTRING_REMOVER,
-                Materialized.<String, String, KeyValueStore<Bytes, byte[]>>as("topic1-Canonized").withValueSerde(stringSerde));
+                Materialized.<String, String, KeyValueStore<Bytes, byte[]>>as("topic1-Canonized")
+                    .withValueSerde(stringSerde));
 
         table2.toStream().process(supplier);
 
-        driver.setUp(builder, stateDir);
+        try (
+            final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build())
+                .withConfig(CONFIG)
+                .withInitialWallClockTime(Instant.ofEpochMilli(0L)).build()) {
+            final TestInputTopic<String, String> inputTopic =
+                driver.createInputTopic(topic1, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
 
-        driver.process(topic1, "A", "1");
-        driver.flushState();
-        driver.process(topic1, "A", null);
-        driver.flushState();
-        driver.process(topic1, "A", "1");
-        driver.flushState();
-        driver.process(topic1, "B", "2");
-        driver.flushState();
-        driver.process(topic1, "null", "3");
-        driver.flushState();
-        driver.process(topic1, "B", "4");
-        driver.flushState();
-        driver.process(topic1, "NULL", "5");
-        driver.flushState();
-        driver.process(topic1, "B", "7");
-        driver.flushState();
+            inputTopic.pipeInput("A", "1", 10L);
+            inputTopic.pipeInput("A", (String) null, 15L);
+            inputTopic.pipeInput("A", "1", 12L);
+            inputTopic.pipeInput("B", "2", 20L);
+            inputTopic.pipeInput("null", "3", 25L);
+            inputTopic.pipeInput("B", "4", 23L);
+            inputTopic.pipeInput("NULL", "5", 24L);
+            inputTopic.pipeInput("B", "7", 22L);
 
-        assertEquals(Utils.mkList(
-                "1:0+1",
-                "1:0+1-1",
-                "1:0+1-1+1",
-                "2:0+2", 
-                  //noop
-                "2:0+2-2", "4:0+4",
-                  //noop
-                "4:0+4-4", "7:0+7"
-                ), supplier.theCapturedProcessor().processed);
-    }
-
-    private void testCountHelper(final StreamsBuilder builder, final String input, final MockProcessorSupplier<String, Object> supplier) {
-        driver.setUp(builder, stateDir);
-
-        driver.process(input, "A", "green");
-        driver.flushState();
-        driver.process(input, "B", "green");
-        driver.flushState();
-        driver.process(input, "A", "blue");
-        driver.flushState();
-        driver.process(input, "C", "yellow");
-        driver.flushState();
-        driver.process(input, "D", "green");
-        driver.flushState();
-        driver.flushState();
-
-
-        assertEquals(Utils.mkList(
-            "green:1",
-            "green:2",
-            "green:1", "blue:1",
-            "yellow:1",
-            "green:2"
-        ), supplier.theCapturedProcessor().processed);
+            assertEquals(
+                asList(
+                    new KeyValueTimestamp<>("1", "0+1", 10),
+                    new KeyValueTimestamp<>("1", "0+1-1", 15),
+                    new KeyValueTimestamp<>("1", "0+1-1+1", 15),
+                    new KeyValueTimestamp<>("2", "0+2", 20),
+                    new KeyValueTimestamp<>("2", "0+2-2", 23),
+                    new KeyValueTimestamp<>("4", "0+4", 23),
+                    new KeyValueTimestamp<>("4", "0+4-4", 23),
+                    new KeyValueTimestamp<>("7", "0+7", 22)),
+                supplier.theCapturedProcessor().processed());
+        }
     }
 
     @Test
-    public void testCount() {
+    public void testAggOfVersionedStore() {
         final StreamsBuilder builder = new StreamsBuilder();
+        final String topic1 = "topic1";
+
+        final Materialized<String, String, KeyValueStore<Bytes, byte[]>> versionedMaterialize =
+            Materialized.as(Stores.persistentVersionedKeyValueStore("versioned", Duration.ofMinutes(5)));
+        final KTable<String, String> table1 = builder.table(topic1, consumed, versionedMaterialize);
+        final KTable<String, String> table2 = table1
+            .groupBy(
+                (key, value) -> {
+                    switch (key) {
+                        case "null":
+                            return KeyValue.pair(null, value);
+                        case "NULL":
+                            return null;
+                        default:
+                            return KeyValue.pair(value, value);
+                    }
+                },
+                stringSerialized)
+            .aggregate(
+                MockInitializer.STRING_INIT,
+                MockAggregator.TOSTRING_ADDER,
+                MockAggregator.TOSTRING_REMOVER,
+                Materialized.<String, String, KeyValueStore<Bytes, byte[]>>as("topic1-Canonized")
+                    .withValueSerde(stringSerde));
+
+        table2.toStream().process(supplier);
+
+        try (
+            final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build())
+                .withConfig(CONFIG)
+                .withInitialWallClockTime(Instant.ofEpochMilli(0L)).build()) {
+            final TestInputTopic<String, String> inputTopic =
+                driver.createInputTopic(topic1, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
+
+            inputTopic.pipeInput("A", "1", 10L);
+            inputTopic.pipeInput("A", (String) null, 15L);
+            inputTopic.pipeInput("A", "1", 12L); // out-of-order record will be ignored
+            inputTopic.pipeInput("B", "2", 20L);
+            inputTopic.pipeInput("null", "3", 25L);
+            inputTopic.pipeInput("B", "4", 23L);
+            inputTopic.pipeInput("NULL", "5", 24L);
+            inputTopic.pipeInput("B", "7", 22L); // out-of-order record will be ignored
+
+            assertEquals(
+                asList(
+                    new KeyValueTimestamp<>("1", "0+1", 10),
+                    new KeyValueTimestamp<>("1", "0+1-1", 15),
+                    new KeyValueTimestamp<>("2", "0+2", 20),
+                    new KeyValueTimestamp<>("2", "0+2-2", 23),
+                    new KeyValueTimestamp<>("4", "0+4", 23)),
+                supplier.theCapturedProcessor().processed());
+        }
+    }
+
+    private static void testCountHelper(final StreamsBuilder builder,
+                                        final String input,
+                                        final MockApiProcessorSupplier<String, Object, Void, Void> supplier) {
+        try (
+            final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build())
+                .withConfig(CONFIG)
+                .withInitialWallClockTime(Instant.ofEpochMilli(0L)).build()) {
+            final TestInputTopic<String, String> inputTopic =
+                driver.createInputTopic(input, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
+
+            inputTopic.pipeInput("A", "green", 10L);
+            inputTopic.pipeInput("B", "green", 9L);
+            inputTopic.pipeInput("A", "blue", 12L);
+            inputTopic.pipeInput("C", "yellow", 15L);
+            inputTopic.pipeInput("D", "green", 11L);
+
+            assertEquals(
+                asList(
+                    new KeyValueTimestamp<>("green", 1L, 10),
+                    new KeyValueTimestamp<>("green", 2L, 10),
+                    new KeyValueTimestamp<>("green", 1L, 12),
+                    new KeyValueTimestamp<>("blue", 1L, 12),
+                    new KeyValueTimestamp<>("yellow", 1L, 15),
+                    new KeyValueTimestamp<>("green", 2L, 12)),
+                supplier.theCapturedProcessor().processed());
+        }
+    }
+
+
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    public void testCount(final boolean withHeaders) {
+        final StreamsBuilder builder = createStreamBuilderInMemory(withHeaders);
         final String input = "count-test-input";
 
-        builder.table(input, consumed)
-                .groupBy(MockMapper.<String, String>selectValueKeyValueMapper(), stringSerialzied)
-                .count(Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("count"))
-                .toStream()
-                .process(supplier);
+        builder
+            .table(input, consumed)
+            .groupBy(MockMapper.selectValueKeyValueMapper(), stringSerialized)
+            .count(Materialized.as("count"))
+            .toStream()
+            .process(supplier);
 
         testCountHelper(builder, input, supplier);
     }
 
-    @Test
-    public void testCountWithInternalStore() {
-        final StreamsBuilder builder = new StreamsBuilder();
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    public void testCountWithInternalStore(final boolean withHeaders) {
+        final StreamsBuilder builder = createStreamBuilderInMemory(withHeaders);
         final String input = "count-test-input";
 
-        builder.table(input, consumed)
-            .groupBy(MockMapper.<String, String>selectValueKeyValueMapper(), stringSerialzied)
+        builder
+            .table(input, consumed)
+            .groupBy(MockMapper.selectValueKeyValueMapper(), stringSerialized)
             .count()
             .toStream()
             .process(supplier);
@@ -257,157 +318,243 @@ public class KTableAggregateTest {
     }
 
     @Test
-    public void testCountCoalesced() {
+    public void testCountOfVersionedStore() {
         final StreamsBuilder builder = new StreamsBuilder();
         final String input = "count-test-input";
-        final MockProcessorSupplier<String, Long> supplier = new MockProcessorSupplier<>();
 
-        builder.table(input, consumed)
-            .groupBy(MockMapper.<String, String>selectValueKeyValueMapper(), stringSerialzied)
-            .count(Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("count"))
+        final Materialized<String, String, KeyValueStore<Bytes, byte[]>> versionedMaterialize =
+            Materialized.as(Stores.persistentVersionedKeyValueStore("versioned", Duration.ofMinutes(5)));
+        builder
+            .table(input, consumed, versionedMaterialize)
+            .groupBy(MockMapper.selectValueKeyValueMapper(), stringSerialized)
+            .count()
             .toStream()
             .process(supplier);
 
-        driver.setUp(builder, stateDir);
+        try (
+            final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build())
+                .withConfig(CONFIG)
+                .withInitialWallClockTime(Instant.ofEpochMilli(0L)).build()) {
+            final TestInputTopic<String, String> inputTopic =
+                driver.createInputTopic(input, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
 
-        final MockProcessor<String, Long> proc = supplier.theCapturedProcessor();
+            inputTopic.pipeInput("A", "green", 10L);
+            inputTopic.pipeInput("B", "green", 9L);
+            inputTopic.pipeInput("A", "blue", 12L);
+            inputTopic.pipeInput("A", "blue", 11L); // out-of-order record will be ignored
+            inputTopic.pipeInput("C", "yellow", 15L);
+            inputTopic.pipeInput("D", "green", 11L);
 
-        driver.process(input, "A", "green");
-        driver.process(input, "B", "green");
-        driver.process(input, "A", "blue");
-        driver.process(input, "C", "yellow");
-        driver.process(input, "D", "green");
-        driver.flushState();
-
-
-        assertEquals(Utils.mkList(
-            "blue:1",
-            "yellow:1",
-            "green:2"
-            ), proc.processed);
+            assertEquals(
+                asList(
+                    new KeyValueTimestamp<>("green", 1L, 10),
+                    new KeyValueTimestamp<>("green", 2L, 10),
+                    new KeyValueTimestamp<>("green", 1L, 12),
+                    new KeyValueTimestamp<>("blue", 1L, 12),
+                    new KeyValueTimestamp<>("yellow", 1L, 15),
+                    new KeyValueTimestamp<>("green", 2L, 12)),
+                supplier.theCapturedProcessor().processed());
+        }
     }
-    
-    @Test
-    public void testRemoveOldBeforeAddNew() {
-        final StreamsBuilder builder = new StreamsBuilder();
+
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    public void testRemoveOldBeforeAddNew(final boolean withHeaders) {
+        final StreamsBuilder builder = createStreamBuilderInMemory(withHeaders);
         final String input = "count-test-input";
-        final MockProcessorSupplier<String, String> supplier = new MockProcessorSupplier<>();
+        final MockApiProcessorSupplier<String, String, Void, Void> supplier = new MockApiProcessorSupplier<>();
 
-        builder.table(input, consumed)
-                .groupBy(new KeyValueMapper<String, String, KeyValue<String, String>>() {
+        builder
+            .table(input, consumed)
+            .groupBy(
+                (key, value) -> KeyValue.pair(
+                    String.valueOf(key.charAt(0)),
+                    String.valueOf(key.charAt(1))),
+                stringSerialized)
+            .aggregate(
+                () -> "",
+                (aggKey, value, aggregate) -> aggregate + value,
+                (key, value, aggregate) -> aggregate.replaceAll(value, ""),
+                Materialized.<String, String, KeyValueStore<Bytes, byte[]>>as("someStore")
+                    .withValueSerde(Serdes.String()))
+            .toStream()
+            .process(supplier);
 
-                    @Override
-                    public KeyValue<String, String> apply(String key, String value) {
-                        return KeyValue.pair(String.valueOf(key.charAt(0)), String.valueOf(key.charAt(1)));
-                    }
-                }, stringSerialzied)
-                .aggregate(new Initializer<String>() {
+        try (
+            final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build())
+                .withConfig(CONFIG)
+                .withInitialWallClockTime(Instant.ofEpochMilli(0L)).build()) {
+            final TestInputTopic<String, String> inputTopic =
+                driver.createInputTopic(input, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
 
-                    @Override
-                    public String apply() {
-                        return "";
-                    }
-                }, new Aggregator<String, String, String>() {
-                    
-                    @Override
-                    public String apply(String aggKey, String value, String aggregate) {
-                        return aggregate + value;
-                    } 
-                }, new Aggregator<String, String, String>() {
+            final MockApiProcessor<String, String, Void, Void> proc = supplier.theCapturedProcessor();
 
-                    @Override
-                    public String apply(String key, String value, String aggregate) {
-                        return aggregate.replaceAll(value, "");
-                    }
-                }, Materialized.<String, String, KeyValueStore<Bytes, byte[]>>as("someStore").withValueSerde(Serdes.String()))
+            inputTopic.pipeInput("11", "A", 10L);
+            inputTopic.pipeInput("12", "B", 8L);
+            inputTopic.pipeInput("11", (String) null, 12L);
+            inputTopic.pipeInput("12", "C", 6L);
+
+            assertEquals(
+                asList(
+                    new KeyValueTimestamp<>("1", "1", 10),
+                    new KeyValueTimestamp<>("1", "12", 10),
+                    new KeyValueTimestamp<>("1", "2", 12),
+                    new KeyValueTimestamp<>("1", "2", 12L)
+                ),
+                proc.processed()
+            );
+        }
+    }
+
+    private void testUpgradeFromConfig(final Properties config, final List<KeyValueTimestamp<String, Long>> expected, final boolean withHeaders) {
+        final StreamsBuilder builder = createStreamBuilderInMemory(withHeaders);
+        final String input = "input-topic";
+        final String output = "output-topic";
+        final Serde<String> stringSerde = Serdes.String();
+
+        builder
+                .table(input, Consumed.with(stringSerde, stringSerde))
+                // key is not changed
+                .groupBy(KeyValue::pair, Grouped.with(stringSerde, stringSerde))
+                .count()
                 .toStream()
-                .process(supplier);
+                .to(output);
 
-        driver.setUp(builder, stateDir);
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build())
+                .withConfig(config)
+                .withInitialWallClockTime(Instant.ofEpochMilli(0L)).build()) {
+            final TestInputTopic<String, String> inputTopic =
+                    driver.createInputTopic(input, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
+            final TestOutputTopic<String, Long> outputTopic =
+                    driver.createOutputTopic(output, new StringDeserializer(), new LongDeserializer());
 
-        final MockProcessor<String, String> proc = supplier.theCapturedProcessor();
+            inputTopic.pipeInput("1", "", 8L);
+            inputTopic.pipeInput("1", "", 9L);
 
-        driver.process(input, "11", "A");
-        driver.flushState();
-        driver.process(input, "12", "B");
-        driver.flushState();
-        driver.process(input, "11", null);
-        driver.flushState();
-        driver.process(input, "12", "C");
-        driver.flushState();
+            final List<KeyValueTimestamp<String, Long>> actual = new ArrayList<>();
+            outputTopic.readRecordsToList().forEach(tr -> actual.add(new KeyValueTimestamp<>(tr.key(), tr.value(), tr.timestamp())));
 
-        assertEquals(Utils.mkList(
-                 "1:1",
-                 "1:12",
-                 "1:2",
-                 "1:2"
-                 ), proc.processed);
+            assertEquals(expected, actual);
+        }
     }
 
-    @Test
-    public void shouldForwardToCorrectProcessorNodeWhenMultiCacheEvictions() {
-        final String tableOne = "tableOne";
-        final String tableTwo = "tableTwo";
-        final StreamsBuilder builder = new StreamsBuilder();
-        final String reduceTopic = "TestDriver-reducer-store-repartition";
-        final Map<String, Long> reduceResults = new HashMap<>();
-
-        final KTable<String, String> one = builder.table(tableOne, consumed);
-        final KTable<Long, String> two = builder.table(tableTwo, Consumed.with(Serdes.Long(), Serdes.String()));
-
-
-        final KTable<String, Long> reduce = two.groupBy(new KeyValueMapper<Long, String, KeyValue<String, Long>>() {
-            @Override
-            public KeyValue<String, Long> apply(final Long key, final String value) {
-                return new KeyValue<>(value, key);
-            }
-        }, Serialized.with(Serdes.String(), Serdes.Long()))
-                .reduce(new Reducer<Long>() {
-                    @Override
-                    public Long apply(final Long value1, final Long value2) {
-                        return value1 + value2;
-                    }
-                }, new Reducer<Long>() {
-                    @Override
-                    public Long apply(final Long value1, final Long value2) {
-                        return value1 - value2;
-                    }
-                }, Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("reducer-store"));
-
-        reduce.toStream().foreach(new ForeachAction<String, Long>() {
-            @Override
-            public void apply(final String key, final Long value) {
-                reduceResults.put(key, value);
-            }
-        });
-
-        one.leftJoin(reduce, new ValueJoiner<String, Long, String>() {
-            @Override
-            public String apply(final String value1, final Long value2) {
-                return value1 + ":" + value2;
-            }
-        })
-                .mapValues(new ValueMapper<String, String>() {
-                    @Override
-                    public String apply(final String value) {
-                        return value;
-                    }
-                });
-
-        driver.setUp(builder, stateDir, 111);
-        driver.process(reduceTopic, "1", new Change<>(1L, null));
-        driver.process("tableOne", "2", "2");
-        // this should trigger eviction on the reducer-store topic
-        driver.process(reduceTopic, "2", new Change<>(2L, null));
-        // this wont as it is the same value
-        driver.process(reduceTopic, "2", new Change<>(2L, null));
-        assertEquals(Long.valueOf(2L), reduceResults.get("2"));
-
-        // this will trigger eviction on the tableOne topic
-        // that in turn will cause an eviction on reducer-topic. It will flush
-        // key 2 as it is the only dirty entry in the cache
-        driver.process("tableOne", "1", "5");
-        assertEquals(Long.valueOf(4L), reduceResults.get("2"));
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    public void testShouldSendTransientStateWhenUpgrading(final boolean withHeaders) {
+        final Properties upgradingConfig = new Properties();
+        upgradingConfig.putAll(CONFIG);
+        upgradingConfig.put(StreamsConfig.UPGRADE_FROM_CONFIG, StreamsConfig.UPGRADE_FROM_33);
+        testUpgradeFromConfig(upgradingConfig, asList(
+                new KeyValueTimestamp<>("1", 1L, 8),
+                new KeyValueTimestamp<>("1", 0L, 9), // transient inconsistent state
+                new KeyValueTimestamp<>("1", 1L, 9)
+        ), withHeaders);
     }
 
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    public void testShouldNotSendTransientStateIfNotUpgrading(final boolean withHeaders) {
+        testUpgradeFromConfig(CONFIG, asList(
+                new KeyValueTimestamp<>("1", 1L, 8),
+                new KeyValueTimestamp<>("1", 1L, 9)
+        ), withHeaders);
+    }
+
+    private static class NoEqualsImpl {
+        private final String x;
+
+        public NoEqualsImpl(final String x) {
+            this.x = x;
+        }
+
+        public String getX() {
+            return x;
+        }
+    }
+
+    private static class NoEqualsImplSerde implements Serde<NoEqualsImpl> {
+        @Override
+        public Serializer<NoEqualsImpl> serializer() {
+            return (topic, data) -> data == null ? null : data.x.getBytes(StandardCharsets.UTF_8);
+        }
+
+        @Override
+        public Deserializer<NoEqualsImpl> deserializer() {
+            return (topic, data) -> data == null ? null : new NoEqualsImpl(new String(data, StandardCharsets.UTF_8));
+        }
+    }
+
+    // `NoEqualsImpl` doesn't implement `equals` but we can still compare two `NoEqualsImpl` instances by comparing their underlying `x` field
+    private List<TestRecord<String, Long>> toComparableList(final List<TestRecord<NoEqualsImpl, Long>> list) {
+        final List<TestRecord<String, Long>> comparableList = new ArrayList<>();
+        list.forEach(tr -> comparableList.add(new TestRecord<>(tr.key().getX(), tr.value(), Instant.ofEpochMilli(tr.timestamp()))));
+        return comparableList;
+    }
+
+    private void testKeyWithNoEquals(
+            final KeyValueMapper<NoEqualsImpl, NoEqualsImpl, KeyValue<NoEqualsImpl, NoEqualsImpl>> keyValueMapper,
+            final List<TestRecord<NoEqualsImpl, Long>> expected,
+            final boolean withHeaders) {
+        final StreamsBuilder builder = createStreamBuilderInMemory(withHeaders);
+        final String input = "input-topic";
+        final String output = "output-topic";
+        final Serde<NoEqualsImpl> noEqualsImplSerde = new NoEqualsImplSerde();
+
+        builder
+                .table(input, Consumed.with(noEqualsImplSerde, noEqualsImplSerde))
+                .groupBy(keyValueMapper, Grouped.with(noEqualsImplSerde, noEqualsImplSerde))
+                .count()
+                .toStream()
+                .to(output);
+
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build())
+                .withConfig(CONFIG)
+                .withInitialWallClockTime(Instant.ofEpochMilli(0L)).build()) {
+            final TestInputTopic<NoEqualsImpl, NoEqualsImpl> inputTopic =
+                    driver.createInputTopic(input, noEqualsImplSerde.serializer(), noEqualsImplSerde.serializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
+            final TestOutputTopic<NoEqualsImpl, Long> outputTopic =
+                    driver.createOutputTopic(output, noEqualsImplSerde.deserializer(), new LongDeserializer());
+
+            final NoEqualsImpl a = new NoEqualsImpl("1");
+            final NoEqualsImpl b = new NoEqualsImpl("1");
+            assertNotEquals(a, b);
+            assertNotSame(a, b);
+
+            inputTopic.pipeInput(a, a, 8);
+            inputTopic.pipeInput(b, b, 9);
+
+            final List<TestRecord<String, Long>> actualComparable = toComparableList(outputTopic.readRecordsToList());
+            final List<TestRecord<String, Long>> expectedComparable = toComparableList(expected);
+            assertEquals(expectedComparable, actualComparable);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    public void testNoEqualsAndNotSameObject(final boolean withHeaders) {
+        testKeyWithNoEquals(
+                // key changes, different object reference (deserializer returns a new object reference)
+                (k, v) -> new KeyValue<>(v, v),
+                asList(
+                        new TestRecord<>(new NoEqualsImpl("1"), 1L, Instant.ofEpochMilli(8)),
+                        new TestRecord<>(new NoEqualsImpl("1"), 0L, Instant.ofEpochMilli(9)), // transient inconsistent state
+                        new TestRecord<>(new NoEqualsImpl("1"), 1L, Instant.ofEpochMilli(9))
+                ),
+                withHeaders
+        );
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true", "false"})
+    public void testNoEqualsAndSameObject(final boolean withHeaders) {
+        testKeyWithNoEquals(
+                // key does not change, same object reference
+                KeyValue::new,
+                asList(
+                        new TestRecord<>(new NoEqualsImpl("1"), 1L, Instant.ofEpochMilli(8)),
+                        new TestRecord<>(new NoEqualsImpl("1"), 1L, Instant.ofEpochMilli(9))
+                ),
+                withHeaders
+        );
+    }
 }

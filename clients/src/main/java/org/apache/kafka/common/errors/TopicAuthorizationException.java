@@ -14,23 +14,36 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.errors;
 
-import java.util.Collections;
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
 import java.util.Set;
 
+@InterfaceAudience.Public
 public class TopicAuthorizationException extends AuthorizationException {
     private final Set<String> unauthorizedTopics;
 
-    public TopicAuthorizationException(Set<String> unauthorizedTopics) {
-        super("Not authorized to access topics: " + unauthorizedTopics);
+    public TopicAuthorizationException(String message, Set<String> unauthorizedTopics) {
+        super(message);
         this.unauthorizedTopics = unauthorizedTopics;
     }
 
-    public TopicAuthorizationException(String unauthorizedTopic) {
-        this(Collections.singleton(unauthorizedTopic));
+    public TopicAuthorizationException(Set<String> unauthorizedTopics) {
+        this("Not authorized to access topics: " + unauthorizedTopics, unauthorizedTopics);
     }
 
+    public TopicAuthorizationException(String message) {
+        this(message, Set.of());
+    }
+
+    /**
+     * Get the set of topics which failed authorization. May be empty if the set is not known
+     * in the context the exception was raised in.
+     *
+     * @return possibly empty set of unauthorized topics
+     */
     public Set<String> unauthorizedTopics() {
         return unauthorizedTopics;
     }

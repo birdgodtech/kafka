@@ -16,21 +16,34 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.errors.InvalidRequestException;
+import org.apache.kafka.common.message.ApiVersionsResponseData;
+import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersionCollection;
+import org.apache.kafka.common.message.CreateTopicsResponseData;
+import org.apache.kafka.common.message.ProduceRequestData;
+import org.apache.kafka.common.message.SaslAuthenticateRequestData;
+import org.apache.kafka.common.network.ClientInformation;
 import org.apache.kafka.common.network.ListenerName;
 import org.apache.kafka.common.network.Send;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.ApiMessage;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.security.auth.SecurityProtocol;
-import org.apache.kafka.common.protocol.types.Struct;
+import org.apache.kafka.common.protocol.ObjectSerializationCache;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
-import org.junit.Test;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
+
+import org.junit.jupiter.api.Test;
 
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class RequestContextTest {
 
@@ -40,7 +53,7 @@ public class RequestContextTest {
 
         RequestHeader header = new RequestHeader(ApiKeys.API_VERSIONS, Short.MAX_VALUE, "", correlationId);
         RequestContext context = new RequestContext(header, "0", InetAddress.getLocalHost(), KafkaPrincipal.ANONYMOUS,
-                new ListenerName("ssl"), SecurityProtocol.SASL_SSL);
+                new ListenerName("ssl"), SecurityProtocol.SASL_SSL, ClientInformation.EMPTY, false);
         assertEquals(0, context.apiVersion());
 
         // Write some garbage to the request buffer. This should be ignored since we will treat
@@ -51,12 +64,14 @@ public class RequestContextTest {
         requestBuffer.flip();
 
         RequestAndSize requestAndSize = context.parseRequest(requestBuffer);
-        assertTrue(requestAndSize.request instanceof ApiVersionsRequest);
+        assertInstanceOf(ApiVersionsRequest.class, requestAndSize.request);
         ApiVersionsRequest request = (ApiVersionsRequest) requestAndSize.request;
         assertTrue(request.hasUnsupportedRequestVersion());
 
-        Send send = context.buildResponse(new ApiVersionsResponse(0, Errors.UNSUPPORTED_VERSION,
-                Collections.<ApiVersionsResponse.ApiVersion>emptyList()));
+        Send send = context.buildResponseSend(new ApiVersionsResponse(new ApiVersionsResponseData()
+            .setThrottleTimeMs(0)
+            .setErrorCode(Errors.UNSUPPORTED_VERSION.code())
+            .setApiKeys(new ApiVersionCollection())));
         ByteBufferChannel channel = new ByteBufferChannel(256);
         send.writeTo(channel);
 
@@ -64,13 +79,182 @@ public class RequestContextTest {
         responseBuffer.flip();
         responseBuffer.getInt(); // strip off the size
 
-        ResponseHeader responseHeader = ResponseHeader.parse(responseBuffer);
+        ResponseHeader responseHeader = ResponseHeader.parse(responseBuffer,
+            ApiKeys.API_VERSIONS.responseHeaderVersion(header.apiVersion()));
         assertEquals(correlationId, responseHeader.correlationId());
 
-        Struct struct = ApiKeys.API_VERSIONS.parseResponse((short) 0, responseBuffer);
-        ApiVersionsResponse response = (ApiVersionsResponse) AbstractResponse.parseResponse(ApiKeys.API_VERSIONS, struct);
-        assertEquals(Errors.UNSUPPORTED_VERSION, response.error());
-        assertTrue(response.apiVersions().isEmpty());
+        ApiVersionsResponse response = (ApiVersionsResponse) AbstractResponse.parseResponse(ApiKeys.API_VERSIONS,
+            new ByteBufferAccessor(responseBuffer), (short) 0);
+        assertEquals(Errors.UNSUPPORTED_VERSION.code(), response.data().errorCode());
+        assertTrue(response.data().apiKeys().isEmpty());
+    }
+
+    @Test
+    public void testEnvelopeResponseSerde() throws Exception {
+        CreateTopicsResponseData.CreatableTopicResultCollection collection =
+            new CreateTopicsResponseData.CreatableTopicResultCollection();
+        collection.add(new CreateTopicsResponseData.CreatableTopicResult()
+            .setTopicConfigErrorCode(Errors.CLUSTER_AUTHORIZATION_FAILED.code())
+            .setNumPartitions(5));
+        CreateTopicsResponseData expectedResponse = new CreateTopicsResponseData()
+            .setThrottleTimeMs(10)
+            .setTopics(collection);
+
+        int correlationId = 15;
+        String clientId = "clientId";
+        RequestHeader header = new RequestHeader(ApiKeys.CREATE_TOPICS, ApiKeys.CREATE_TOPICS.latestVersion(),
+            clientId, correlationId);
+
+        RequestContext context = new RequestContext(header, "0", InetAddress.getLocalHost(),
+            KafkaPrincipal.ANONYMOUS, new ListenerName("ssl"), SecurityProtocol.SASL_SSL,
+            ClientInformation.EMPTY, true);
+
+        ByteBuffer buffer = context.buildResponseEnvelopePayload(new CreateTopicsResponse(expectedResponse));
+        assertEquals(buffer.capacity(), buffer.limit(), "Buffer limit and capacity should be the same");
+        CreateTopicsResponse parsedResponse = (CreateTopicsResponse) AbstractResponse.parseResponse(buffer, header);
+        assertEquals(expectedResponse, parsedResponse.data());
+    }
+
+    @Test
+    public void testInvalidRequestForImplicitHashCollection() throws UnknownHostException {
+        short version = (short) 7; // choose a version with fixed length encoding, for simplicity
+        ByteBuffer corruptBuffer = produceRequest(version);
+        // corrupt the length of the topics array
+        corruptBuffer.putInt(8, (Integer.MAX_VALUE - 1) / 2);
+
+        RequestHeader header = new RequestHeader(ApiKeys.PRODUCE, version, "console-producer", 3);
+        RequestContext context = new RequestContext(header, "0", InetAddress.getLocalHost(),
+                KafkaPrincipal.ANONYMOUS, new ListenerName("ssl"), SecurityProtocol.SASL_SSL,
+                ClientInformation.EMPTY, true);
+
+        String msg = assertThrows(InvalidRequestException.class,
+                () -> context.parseRequest(corruptBuffer)).getCause().getMessage();
+        assertEquals("Tried to allocate a collection of size 1073741823, but there are only 17 bytes remaining.", msg);
+    }
+
+    @Test
+    public void testInvalidRequestForImplicitHashCollectionWithMaxPreAllocation() throws UnknownHostException {
+        short version = (short) 7; // non-flexible, name-based and no topicId
+        int actualTopicCount = 1010; // (greater than the 1000 pre-alloc cap)
+        ProduceRequestData data = new ProduceRequestData().setAcks((short) -1).setTimeoutMs(1);
+        for (int i = 0; i < actualTopicCount; i++) {
+            data.topicData().add(new ProduceRequestData.TopicProduceData()
+                    .setName("t" + i)
+                    .setPartitionData(Collections.emptyList()));
+        }
+        ByteBuffer buffer = serialize(version, data);
+
+        // Inflate the declared topic_data array length.
+        buffer.putInt(8, 5000);
+
+        RequestHeader header = new RequestHeader(ApiKeys.PRODUCE, version, "console-producer", 3);
+        RequestContext context = new RequestContext(header, "0", InetAddress.getLocalHost(),
+                KafkaPrincipal.ANONYMOUS, new ListenerName("ssl"), SecurityProtocol.SASL_SSL,
+                ClientInformation.EMPTY, true);
+
+        assertThrows(InvalidRequestException.class, () -> context.parseRequest(buffer));
+    }
+
+    @Test
+    public void testProduceRequestV3WithHugeDeclaredTopicCountIsRejected() throws UnknownHostException {
+        short version = 3; // ProduceRequestData.LOWEST_SUPPORTED_VERSION
+        int declaredTopicCount = 89_999_978;
+
+        // Real ~90MB buffer, backed by declaredTopicCount padding bytes, so the pre-existing
+        // count-vs-remaining-bytes guard alone would let this through and the
+        // new hard cap is what has to catch it.
+        ByteBuffer buffer = ByteBuffer.allocate(12 + declaredTopicCount);
+        buffer.putShort((short) -1); // null transactionalId
+        buffer.putShort((short) -1); // acks
+        buffer.putInt(1); // timeoutMs
+        buffer.putInt(declaredTopicCount); // topic_data declared length
+        buffer.position(12 + declaredTopicCount);
+        buffer.flip();
+
+        RequestHeader header = new RequestHeader(ApiKeys.PRODUCE, version, "console-producer", 3);
+        RequestContext context = new RequestContext(header, "0", InetAddress.getLocalHost(),
+                KafkaPrincipal.ANONYMOUS, new ListenerName("plaintext"), SecurityProtocol.PLAINTEXT,
+                ClientInformation.EMPTY, false);
+
+        InvalidRequestException e = assertThrows(InvalidRequestException.class, () -> context.parseRequest(buffer));
+        assertTrue(e.getCause().getMessage().contains("exceeds the maximum allowed size"),
+                "Expected a hard-cap rejection, but got: " + e.getCause().getMessage());
+    }
+
+    @Test
+    public void testInvalidRequestForArrayList() throws UnknownHostException {
+        short version = (short) 7; // choose a version with fixed length encoding, for simplicity
+        ByteBuffer corruptBuffer = produceRequest(version);
+        // corrupt the length of the partitions array
+        corruptBuffer.putInt(17, Integer.MAX_VALUE);
+
+        RequestHeader header = new RequestHeader(ApiKeys.PRODUCE, version, "console-producer", 3);
+        RequestContext context = new RequestContext(header, "0", InetAddress.getLocalHost(),
+                KafkaPrincipal.ANONYMOUS, new ListenerName("ssl"), SecurityProtocol.SASL_SSL,
+                ClientInformation.EMPTY, true);
+
+        String msg = assertThrows(InvalidRequestException.class,
+                () -> context.parseRequest(corruptBuffer)).getCause().getMessage();
+        assertEquals(
+                "Tried to allocate a collection of size 2147483647, but there are only 8 bytes remaining.", msg);
+    }
+
+    @Test
+    public void testKeyedCollectionAboveInitialCapacityStillParses() {
+        short version = (short) 7; // non-flexible, name-based and no topicId
+        int count = 1010;
+        ProduceRequestData data = new ProduceRequestData()
+                .setAcks((short) -1)
+                .setTimeoutMs(1);
+        for (int i = 0; i < count; i++) {
+            data.topicData().add(new ProduceRequestData.TopicProduceData()
+                    .setName("t" + i)
+                    .setPartitionData(Collections.emptyList()));
+        }
+
+        ByteBuffer buffer = serialize(version, data);
+        ProduceRequestData parsed = new ProduceRequestData(new ByteBufferAccessor(buffer), version);
+
+        assertEquals(count, parsed.topicData().size());
+    }
+
+    private ByteBuffer produceRequest(short version) {
+        ProduceRequestData data = new ProduceRequestData()
+                .setAcks((short) -1)
+                .setTimeoutMs(1);
+        data.topicData().add(
+                new ProduceRequestData.TopicProduceData()
+                        .setName("foo") // versions in this test < 13, topicId can't be used
+                        .setPartitionData(Collections.singletonList(new ProduceRequestData.PartitionProduceData()
+                                .setIndex(42))));
+
+        return serialize(version, data);
+    }
+
+    private ByteBuffer serialize(short version, ApiMessage data) {
+        ObjectSerializationCache cache = new ObjectSerializationCache();
+        int size = data.size(cache, version);
+        ByteBuffer buffer = ByteBuffer.allocate(size);
+        data.write(new ByteBufferAccessor(buffer), cache, version);
+        buffer.flip();
+        return buffer;
+    }
+
+    @Test
+    public void testInvalidRequestForByteArray() throws UnknownHostException {
+        short version = (short) 1; // choose a version with fixed length encoding, for simplicity
+        ByteBuffer corruptBuffer = serialize(version, new SaslAuthenticateRequestData().setAuthBytes(new byte[0]));
+        // corrupt the length of the bytes array
+        corruptBuffer.putInt(0, Integer.MAX_VALUE);
+
+        RequestHeader header = new RequestHeader(ApiKeys.SASL_AUTHENTICATE, version, "console-producer", 1);
+        RequestContext context = new RequestContext(header, "0", InetAddress.getLocalHost(),
+                KafkaPrincipal.ANONYMOUS, new ListenerName("ssl"), SecurityProtocol.SASL_SSL,
+                ClientInformation.EMPTY, true);
+
+        String msg = assertThrows(InvalidRequestException.class,
+                () -> context.parseRequest(corruptBuffer)).getCause().getMessage();
+        assertEquals("Error reading byte array of 2147483647 byte(s): only 0 byte(s) available", msg);
     }
 
 }

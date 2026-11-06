@@ -23,127 +23,97 @@ import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.streams.kstream.internals.ChangedDeserializer;
 import org.apache.kafka.streams.kstream.internals.ChangedSerializer;
 import org.apache.kafka.streams.processor.FailOnInvalidTimestamp;
+import org.apache.kafka.streams.processor.internals.InternalTopicProperties;
 import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
 
-public class GroupedTableOperationRepartitionNode<K, V> extends BaseRepartitionNode {
+public class GroupedTableOperationRepartitionNode<K, V> extends BaseRepartitionNode<K, V> {
 
 
-    GroupedTableOperationRepartitionNode(final String nodeName,
-                                         final Serde<K> keySerde,
-                                         final Serde<V> valueSerde,
-                                         final String sinkName,
-                                         final String sourceName,
-                                         final String repartitionTopic,
-                                         final ProcessorParameters processorParameters) {
-
-        super(nodeName,
-              sourceName,
-              processorParameters,
-              keySerde,
-              valueSerde,
-              sinkName,
-              repartitionTopic
+    private GroupedTableOperationRepartitionNode(final String nodeName,
+                                                 final Serde<K> keySerde,
+                                                 final Serde<V> valueSerde,
+                                                 final String sinkName,
+                                                 final String sourceName,
+                                                 final String repartitionTopic,
+                                                 final ProcessorParameters<K, V, K, V> processorParameters) {
+        super(
+            nodeName,
+            sourceName,
+            processorParameters,
+            keySerde,
+            valueSerde,
+            sinkName,
+            repartitionTopic,
+            null,
+            InternalTopicProperties.empty()
         );
     }
 
     @Override
-    Serializer getValueSerializer() {
-        final Serializer<? extends V> valueSerializer = valueSerde == null ? null : valueSerde.serializer();
-        return new ChangedSerializer<>(valueSerializer);
+    Serializer<V> valueSerializer() {
+        final Serializer<V> valueSerializer = super.valueSerializer();
+        return unsafeCastChangedToValueSerializer(valueSerializer);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Serializer<V> unsafeCastChangedToValueSerializer(final Serializer<V> valueSerializer) {
+        return (Serializer<V>) new ChangedSerializer<>(valueSerializer);
     }
 
     @Override
-    Deserializer getValueDeserializer() {
-        final Deserializer<? extends V> valueDeserializer = valueSerde == null ? null : valueSerde.deserializer();
-        return new ChangedDeserializer<>(valueDeserializer);
+    Deserializer<V> valueDeserializer() {
+        final Deserializer<? extends V> valueDeserializer = super.valueDeserializer();
+        return unsafeCastChangedToValueDeserializer(valueDeserializer);
     }
 
+    @SuppressWarnings("unchecked")
+    private Deserializer<V> unsafeCastChangedToValueDeserializer(final Deserializer<? extends V> valueDeserializer) {
+        return (Deserializer<V>) new ChangedDeserializer<>(valueDeserializer);
+    }
 
     @Override
-    public void writeToTopology(InternalTopologyBuilder topologyBuilder) {
-        final Serializer<K> keySerializer = keySerde != null ? keySerde.serializer() : null;
-        final Deserializer<K> keyDeserializer = keySerde != null ? keySerde.deserializer() : null;
-
-
-        topologyBuilder.addInternalTopic(repartitionTopic);
-
-        topologyBuilder.addSink(sinkName,
-                                repartitionTopic,
-                                keySerializer,
-                                getValueSerializer(),
-                                null,
-                                parentNode().nodeName());
-
-        topologyBuilder.addSource(null,
-                                  sourceName,
-                                  new FailOnInvalidTimestamp(),
-                                  keyDeserializer,
-                                  getValueDeserializer(),
-                                  repartitionTopic);
-
+    public String toString() {
+        return "GroupedTableOperationRepartitionNode{} " + super.toString();
     }
 
-    public static GroupedTableOperationRepartitionNodeBuilder groupedTableOperationNodeBuilder() {
-        return new GroupedTableOperationRepartitionNodeBuilder();
+    @Override
+    public void writeToTopology(final InternalTopologyBuilder topologyBuilder) {
+        topologyBuilder.addInternalTopic(repartitionTopic, internalTopicProperties);
+
+        topologyBuilder.addSink(
+            sinkName,
+            repartitionTopic,
+            keySerializer(),
+            valueSerializer(),
+            null,
+            parentNodeNames()
+        );
+
+        topologyBuilder.addSource(
+            null,
+            sourceName,
+            new FailOnInvalidTimestamp(),
+            keyDeserializer(),
+            valueDeserializer(),
+            repartitionTopic
+        );
     }
 
+    public static <K, V> GroupedTableOperationRepartitionNodeBuilder<K, V> groupedTableOperationNodeBuilder() {
+        return new GroupedTableOperationRepartitionNodeBuilder<>();
+    }
 
-    public static final class GroupedTableOperationRepartitionNodeBuilder<K, V> {
-
-        private Serde<K> keySerde;
-        private Serde<V> valueSerde;
-        private String sinkName;
-        private String nodeName;
-        private String sourceName;
-        private String repartitionTopic;
-        private ProcessorParameters processorParameters;
-
-        private GroupedTableOperationRepartitionNodeBuilder() {
-        }
-
-        public GroupedTableOperationRepartitionNodeBuilder<K, V> withKeySerde(Serde<K> keySerde) {
-            this.keySerde = keySerde;
-            return this;
-        }
-
-        public GroupedTableOperationRepartitionNodeBuilder<K, V> withValueSerde(Serde<V> valueSerde) {
-            this.valueSerde = valueSerde;
-            return this;
-        }
-
-        public GroupedTableOperationRepartitionNodeBuilder<K, V> withSinkName(String sinkName) {
-            this.sinkName = sinkName;
-            return this;
-        }
-
-        public GroupedTableOperationRepartitionNodeBuilder<K, V> withNodeName(String nodeName) {
-            this.nodeName = nodeName;
-            return this;
-        }
-
-        public GroupedTableOperationRepartitionNodeBuilder<K, V> withSourceName(String sourceName) {
-            this.sourceName = sourceName;
-            return this;
-        }
-
-        public GroupedTableOperationRepartitionNodeBuilder<K, V> withRepartitionTopic(String repartitionTopic) {
-            this.repartitionTopic = repartitionTopic;
-            return this;
-        }
-
-        public GroupedTableOperationRepartitionNodeBuilder<K, V> withProcessorParameters(ProcessorParameters processorParameters) {
-            this.processorParameters = processorParameters;
-            return this;
-        }
-
+    public static final class GroupedTableOperationRepartitionNodeBuilder<K, V> extends BaseRepartitionNodeBuilder<K, V, GroupedTableOperationRepartitionNode<K, V>> {
+        @Override
         public GroupedTableOperationRepartitionNode<K, V> build() {
-            return new GroupedTableOperationRepartitionNode(nodeName,
-                                                            keySerde,
-                                                            valueSerde,
-                                                            sinkName,
-                                                            sourceName,
-                                                            repartitionTopic,
-                                                            processorParameters
+            return new GroupedTableOperationRepartitionNode<>(
+                nodeName,
+                keySerde,
+                valueSerde,
+                sinkName,
+                sourceName,
+                repartitionTopic,
+                processorParameters
             );
         }
     }

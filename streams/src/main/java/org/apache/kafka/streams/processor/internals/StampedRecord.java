@@ -19,10 +19,26 @@ package org.apache.kafka.streams.processor.internals;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.header.Headers;
 
-public class StampedRecord extends Stamped<ConsumerRecord<Object, Object>> {
+import java.util.Optional;
 
-    public StampedRecord(ConsumerRecord<Object, Object> record, long timestamp) {
+public class StampedRecord extends Stamped<ConsumerRecord<?, ?>> {
+
+    private final byte[] rawKey;
+    private final byte[] rawValue;
+
+    public StampedRecord(final ConsumerRecord<?, ?> record, final long timestamp) {
         super(record, timestamp);
+        this.rawKey = null;
+        this.rawValue = null;
+    }
+
+    public StampedRecord(final ConsumerRecord<?, ?> record,
+                         final long timestamp,
+                         final byte[] rawKey,
+                         final byte[] rawValue) {
+        super(record, timestamp);
+        this.rawKey = rawKey;
+        this.rawValue = rawValue;
     }
 
     public String topic() {
@@ -45,12 +61,34 @@ public class StampedRecord extends Stamped<ConsumerRecord<Object, Object>> {
         return value.offset();
     }
 
+    public Optional<Integer> leaderEpoch() {
+        return value.leaderEpoch();
+    }
+
     public Headers headers() {
         return value.headers();
+    }
+
+    public byte[] rawKey() {
+        return rawKey;
+    }
+
+    public byte[] rawValue() {
+        return rawValue;
     }
 
     @Override
     public String toString() {
         return value.toString() + ", timestamp = " + timestamp;
+    }
+
+    @Override
+    public boolean equals(final Object other) {
+        return super.equals(other);
+    }
+
+    @Override
+    public int hashCode() {
+        return super.hashCode();
     }
 }

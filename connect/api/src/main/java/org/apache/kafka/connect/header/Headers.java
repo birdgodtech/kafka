@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.connect.header;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaAndValue;
 import org.apache.kafka.connect.data.Struct;
@@ -29,6 +30,7 @@ import java.util.Map;
 /**
  * A mutable ordered collection of {@link Header} objects. Note that multiple headers may have the same {@link Header#key() key}.
  */
+@InterfaceAudience.Public
 public interface Headers extends Iterable<Header> {
 
     /**
@@ -254,7 +256,7 @@ public interface Headers extends Iterable<Header> {
     Headers retainLatest(String key);
 
     /**
-     * Removes all but the last {@Header} object with each key.
+     * Removes all but the last {@link Header} object with each key.
      *
      * @return this object to facilitate chaining multiple methods; never null
      */

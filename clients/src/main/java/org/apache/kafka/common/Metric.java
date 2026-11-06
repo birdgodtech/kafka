@@ -14,25 +14,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 /**
  * A metric tracked for monitoring purposes.
  */
+@InterfaceAudience.Public
 public interface Metric {
 
     /**
      * A name for this metric
      */
     MetricName metricName();
-
-    /**
-     * The value of the metric as double if the metric is measurable and `0.0` otherwise.
-     *
-     * @deprecated As of 1.0.0, use {@link #metricValue()} instead. This will be removed in a future major release.
-     */
-    @Deprecated
-    double value();
 
     /**
      * The value of the metric, which may be measurable or a non-measurable gauge

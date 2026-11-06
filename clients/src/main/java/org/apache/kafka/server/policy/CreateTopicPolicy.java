@@ -17,22 +17,25 @@
 package org.apache.kafka.server.policy;
 
 import org.apache.kafka.common.Configurable;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.errors.PolicyViolationException;
 
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
- * An interface for enforcing a policy on create topics requests.
+ * <p>An interface for enforcing a policy on create topics requests.
  *
- * Common use cases are requiring that the replication factor, min.insync.replicas and/or retention settings for a
+ * <p>Common use cases are requiring that the replication factor, <code>min.insync.replicas</code> and/or retention settings for a
  * topic are within an allowable range.
  *
- * If <code>create.topic.policy.class.name</code> is defined, Kafka will create an instance of the specified class
+ * <p>If <code>create.topic.policy.class.name</code> is defined, Kafka will create an instance of the specified class
  * using the default constructor and will then pass the broker configs to its <code>configure()</code> method. During
  * broker shutdown, the <code>close()</code> method will be invoked so that resources can be released (if necessary).
  */
+@InterfaceAudience.Public
 public interface CreateTopicPolicy extends Configurable, AutoCloseable {
 
     /**
@@ -50,7 +53,7 @@ public interface CreateTopicPolicy extends Configurable, AutoCloseable {
          *
          * This constructor is public to make testing of <code>CreateTopicPolicy</code> implementations easier.
          *
-         * @param topic the name of the topic to created.
+         * @param topic the name of the topic to create.
          * @param numPartitions the number of partitions to create or null if replicasAssignments is set.
          * @param replicationFactor the replication factor for the topic or null if replicaAssignments is set.
          * @param replicasAssignments replica assignments or null if numPartitions and replicationFactor is set. The
@@ -102,6 +105,24 @@ public interface CreateTopicPolicy extends Configurable, AutoCloseable {
          */
         public Map<String, String> configs() {
             return configs;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(topic, numPartitions, replicationFactor,
+                replicasAssignments, configs);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            RequestMetadata other = (RequestMetadata) o;
+            return topic.equals(other.topic) &&
+                Objects.equals(numPartitions, other.numPartitions) &&
+                Objects.equals(replicationFactor, other.replicationFactor) &&
+                Objects.equals(replicasAssignments, other.replicasAssignments) &&
+                configs.equals(other.configs);
         }
 
         @Override

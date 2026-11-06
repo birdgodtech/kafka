@@ -14,16 +14,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.streams.errors;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 /**
  * Indicates a run time error incurred while trying to assign
  * {@link org.apache.kafka.streams.processor.internals.StreamTask stream tasks} to
  * {@link org.apache.kafka.streams.processor.internals.StreamThread threads}.
  */
+@InterfaceAudience.Public
 public class TaskAssignmentException extends StreamsException {
 
-    private final static long serialVersionUID = 1L;
+    private static final long serialVersionUID = 1L;
 
     public TaskAssignmentException(final String message) {
         super(message);

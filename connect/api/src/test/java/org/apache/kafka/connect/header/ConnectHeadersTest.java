@@ -28,27 +28,31 @@ import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.data.Values;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.header.Headers.HeaderTransform;
-import org.junit.Before;
-import org.junit.Test;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
-import java.util.Collections;
 import java.util.GregorianCalendar;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.TimeZone;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNotSame;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class ConnectHeadersTest {
 
@@ -70,16 +74,17 @@ public class ConnectHeadersTest {
     private String key;
     private String other;
 
-    @Before
+    @BeforeEach
     public void beforeEach() {
         headers = new ConnectHeaders();
         key = "k1";
         other = "other key";
     }
 
-    @Test(expected = NullPointerException.class)
+    @Test
     public void shouldNotAllowNullKey() {
-        headers.add(null, "value", Schema.STRING_SCHEMA);
+        assertThrows(NullPointerException.class,
+            () -> headers.add(null, "value", Schema.STRING_SCHEMA));
     }
 
     protected void populate(Headers headers) {
@@ -116,6 +121,14 @@ public class ConnectHeadersTest {
         // not empty
         populate(headers);
         assertNotNull(headers.toString());
+    }
+
+    @Test
+    public void shouldRetainLatestWhenEmpty() {
+        headers.retainLatest(other);
+        headers.retainLatest(key);
+        headers.retainLatest();
+        assertTrue(headers.isEmpty());
     }
 
     @Test
@@ -180,6 +193,12 @@ public class ConnectHeadersTest {
     }
 
     @Test
+    public void shouldRemoveAllHeadersWithSameKeyWhenEmpty() {
+        headers.remove(key);
+        assertNoHeaderWithKey(key);
+    }
+
+    @Test
     public void shouldRemoveAllHeadersWithSameKey() {
         populate(headers);
 
@@ -208,6 +227,13 @@ public class ConnectHeadersTest {
         assertNoHeaderWithKey(key);
         assertNoHeaderWithKey(other);
         assertEquals(0, headers.size());
+        assertTrue(headers.isEmpty());
+    }
+
+    @Test
+    public void shouldTransformHeadersWhenEmpty() {
+        headers.apply(appendToKey("-suffix"));
+        headers.apply(key, appendToKey("-suffix"));
         assertTrue(headers.isEmpty());
     }
 
@@ -321,24 +347,16 @@ public class ConnectHeadersTest {
     }
 
     protected HeaderTransform appendToKey(final String suffix) {
-        return new HeaderTransform() {
-            @Override
-            public Header apply(Header header) {
-                return header.rename(header.key() + suffix);
-            }
-        };
+        return header -> header.rename(header.key() + suffix);
     }
 
     protected HeaderTransform removeHeadersOfType(final Type type) {
-        return new HeaderTransform() {
-            @Override
-            public Header apply(Header header) {
-                Schema schema = header.schema();
-                if (schema != null && schema.type() == type) {
-                    return null;
-                }
-                return header;
+        return header -> {
+            Schema schema = header.schema();
+            if (schema != null && schema.type() == type) {
+                return null;
             }
+            return header;
         };
     }
 
@@ -363,9 +381,9 @@ public class ConnectHeadersTest {
         assertSchemaMatches(Schema.FLOAT64_SCHEMA, 1.0d);
         assertSchemaMatches(Schema.STRING_SCHEMA, "value");
         assertSchemaMatches(SchemaBuilder.array(Schema.STRING_SCHEMA), new ArrayList<String>());
-        assertSchemaMatches(SchemaBuilder.array(Schema.STRING_SCHEMA), Collections.singletonList("value"));
+        assertSchemaMatches(SchemaBuilder.array(Schema.STRING_SCHEMA), List.of("value"));
         assertSchemaMatches(SchemaBuilder.map(Schema.STRING_SCHEMA, Schema.INT32_SCHEMA), new HashMap<String, Integer>());
-        assertSchemaMatches(SchemaBuilder.map(Schema.STRING_SCHEMA, Schema.INT32_SCHEMA), Collections.singletonMap("a", 0));
+        assertSchemaMatches(SchemaBuilder.map(Schema.STRING_SCHEMA, Schema.INT32_SCHEMA), Map.of("a", 0));
         Schema emptyStructSchema = SchemaBuilder.struct();
         assertSchemaMatches(emptyStructSchema, new Struct(emptyStructSchema));
         Schema structSchema = SchemaBuilder.struct().field("foo", Schema.OPTIONAL_BOOLEAN_SCHEMA).field("bar", Schema.STRING_SCHEMA)
@@ -477,26 +495,30 @@ public class ConnectHeadersTest {
         assertNotSame(headers, headers.duplicate());
     }
 
+    @Test
+    public void shouldNotAllowToAddNullHeader() {
+        final ConnectHeaders headers = new ConnectHeaders();
+        assertThrows(NullPointerException.class, () -> headers.add(null));
+    }
+
+    @Test
+    public void shouldThrowNpeWhenAddingCollectionWithNullHeader() {
+        final Iterable<Header> header = Arrays.asList(new ConnectHeader[1]);
+        assertThrows(NullPointerException.class, () -> new ConnectHeaders(header));
+    }
+
     protected void assertSchemaMatches(Schema schema, Object value) {
         headers.checkSchemaMatches(new SchemaAndValue(schema.schema(), value));
     }
 
     protected void assertSchemaDoesNotMatch(Schema schema, Object value) {
-        try {
-            assertSchemaMatches(schema, value);
-            fail("Should have failed to validate value '" + value + "' and schema: " + schema);
-        } catch (DataException e) {
-            // expected
-        }
+        assertThrows(DataException.class, () -> assertSchemaMatches(schema, value),
+            "Should have failed to validate value '" + value + "' and schema: " + schema);
     }
 
     protected void attemptAndFailToAddHeader(String key, Schema schema, Object value) {
-        try {
-            headers.add(key, value, schema);
-            fail("Should have failed to add header with key '" + key + "', value '" + value + "', and schema: " + schema);
-        } catch (DataException e) {
-            // expected
-        }
+        assertThrows(DataException.class, () -> headers.add(key, value, schema),
+            "Should have failed to add header with key '" + key + "', value '" + value + "', and schema: " + schema);
     }
 
     protected void addHeader(String key, Schema schema, Object value) {

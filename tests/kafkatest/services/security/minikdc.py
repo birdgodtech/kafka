@@ -14,8 +14,6 @@
 # limitations under the License.
 
 import os
-import random
-import uuid
 from io import open
 from os import remove, close
 from shutil import move
@@ -24,6 +22,7 @@ from tempfile import mkstemp
 from ducktape.services.service import Service
 
 from kafkatest.directory_layout.kafka_path import KafkaPathResolverMixin, CORE_LIBS_JAR_NAME, CORE_DEPENDANT_TEST_LIBS_JAR_NAME
+from kafkatest.utils.remote_account import java_version
 from kafkatest.version import DEV_BRANCH
 
 
@@ -109,11 +108,17 @@ class MiniKdc(KafkaPathResolverMixin, Service):
         cmd = "for file in %s; do CLASSPATH=$CLASSPATH:$file; done;" % core_libs_jar
         cmd += " for file in %s; do CLASSPATH=$CLASSPATH:$file; done;" % core_dependant_test_libs_jar
         cmd += " export CLASSPATH;"
-        cmd += " %s kafka.security.minikdc.MiniKdc %s %s %s %s 1>> %s 2>> %s &" % (self.path.script("kafka-run-class.sh", node), MiniKdc.WORK_DIR, MiniKdc.PROPS_FILE, MiniKdc.KEYTAB_FILE, principals, MiniKdc.LOG_FILE, MiniKdc.LOG_FILE)
+
+        jdk_version = java_version(node)
+        if jdk_version >= 16:
+            # avoids java.lang.IllegalAccessException due to usage of internal `sun.security.krb5.Config` in `MiniKdc`
+            cmd += " export KAFKA_OPTS=\"--add-exports java.security.jgss/sun.security.krb5=ALL-UNNAMED\";"
+
+        cmd += " %s org.apache.kafka.security.minikdc.MiniKdc %s %s %s %s 1>> %s 2>> %s &" % (self.path.script("kafka-run-class.sh", node), MiniKdc.WORK_DIR, MiniKdc.PROPS_FILE, MiniKdc.KEYTAB_FILE, principals, MiniKdc.LOG_FILE, MiniKdc.LOG_FILE)
         self.logger.debug("Attempting to start MiniKdc on %s with command: %s" % (str(node.account), cmd))
         with node.account.monitor_log(MiniKdc.LOG_FILE) as monitor:
             node.account.ssh(cmd)
-            monitor.wait_until("MiniKdc Running", timeout_sec=60, backoff_sec=1, err_msg="MiniKdc didn't finish startup")
+            monitor.wait_until("MiniKdc Running", timeout_sec=120, backoff_sec=1, err_msg="MiniKdc didn't finish startup")
 
         node.account.copy_from(MiniKdc.KEYTAB_FILE, MiniKdc.LOCAL_KEYTAB_FILE)
         node.account.copy_from(MiniKdc.KRB5CONF_FILE, MiniKdc.LOCAL_KRB5CONF_FILE)
@@ -123,14 +128,12 @@ class MiniKdc(KafkaPathResolverMixin, Service):
 
     def stop_node(self, node):
         self.logger.info("Stopping %s on %s" % (type(self).__name__, node.account.hostname))
-        node.account.kill_process("apacheds", allow_fail=False)
+        node.account.kill_java_processes("MiniKdc", clean_shutdown=True, allow_fail=False)
 
     def clean_node(self, node):
-        node.account.kill_process("apacheds", clean_shutdown=False, allow_fail=False)
+        node.account.kill_java_processes("MiniKdc", clean_shutdown=False, allow_fail=True)
         node.account.ssh("rm -rf " + MiniKdc.WORK_DIR, allow_fail=False)
         if os.path.exists(MiniKdc.LOCAL_KEYTAB_FILE):
             os.remove(MiniKdc.LOCAL_KEYTAB_FILE)
         if os.path.exists(MiniKdc.LOCAL_KRB5CONF_FILE):
             os.remove(MiniKdc.LOCAL_KRB5CONF_FILE)
-
-

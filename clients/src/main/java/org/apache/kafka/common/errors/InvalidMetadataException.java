@@ -14,28 +14,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.errors;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 /**
  * An exception that may indicate the client's metadata is out of date
  */
-public abstract class InvalidMetadataException extends RetriableException {
+@InterfaceAudience.Public
+public abstract class InvalidMetadataException extends RefreshRetriableException {
 
     private static final long serialVersionUID = 1L;
 
-    public InvalidMetadataException() {
+    protected InvalidMetadataException() {
         super();
     }
 
-    public InvalidMetadataException(String message) {
+    protected InvalidMetadataException(String message) {
         super(message);
     }
 
-    public InvalidMetadataException(String message, Throwable cause) {
+    protected InvalidMetadataException(String message, Throwable cause) {
         super(message, cause);
     }
 
-    public InvalidMetadataException(Throwable cause) {
+    protected InvalidMetadataException(Throwable cause) {
         super(cause);
     }
 

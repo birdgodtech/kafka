@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.connect.source;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
+import org.apache.kafka.common.metrics.PluginMetrics;
 import org.apache.kafka.connect.storage.OffsetStorageReader;
 
 import java.util.Map;
@@ -24,18 +26,66 @@ import java.util.Map;
  * SourceTaskContext is provided to SourceTasks to allow them to interact with the underlying
  * runtime.
  */
+@InterfaceAudience.Public
 public interface SourceTaskContext {
     /**
-     * Get the Task configuration.  This is the latest configuration and may differ from that passed on startup.
-     *
+     * Get the Task configuration. This is the latest configuration and may differ from that passed on startup.
+     * <p>
      * For example, this method can be used to obtain the latest configuration if an external secret has changed,
      * and the configuration is using variable references such as those compatible with
      * {@link org.apache.kafka.common.config.ConfigTransformer}.
      */
-    public Map<String, String> configs();
+    Map<String, String> configs();
 
     /**
      * Get the OffsetStorageReader for this SourceTask.
      */
     OffsetStorageReader offsetStorageReader();
+
+    /**
+     * Get a {@link TransactionContext} that can be used to define producer transaction boundaries
+     * when exactly-once support is enabled for the connector.
+     *
+     * <p>This method was added in Apache Kafka 3.2. Source tasks that use this method but want to
+     * maintain backward compatibility so they can also be deployed to older Connect runtimes
+     * should guard the call to this method with a try-catch block, since calling this method will result in a
+     * {@link NoSuchMethodError} or {@link NoClassDefFoundError} when the source connector is deployed to
+     * Connect runtimes older than Kafka 3.2. For example:
+     * <pre>
+     *     TransactionContext transactionContext;
+     *     try {
+     *         transactionContext = context.transactionContext();
+     *     } catch (NoSuchMethodError | NoClassDefFoundError e) {
+     *         transactionContext = null;
+     *     }
+     * </pre>
+     *
+     * @return the transaction context, or null if the connector was not configured to specify transaction boundaries
+     * @since 3.3
+     */
+    default TransactionContext transactionContext() {
+        return null;
+    }
+
+    /**
+     * Get a {@link PluginMetrics} that can be used to define metrics
+     *
+     * <p>This method was added in Apache Kafka 4.1. Tasks that use this method but want to
+     * maintain backward compatibility so they can also be deployed to older Connect runtimes
+     * should guard the call to this method with a try-catch block, since calling this method will result in a
+     * {@link NoSuchMethodError} or {@link NoClassDefFoundError} when the connector is deployed to
+     * Connect runtimes older than Kafka 4.1. For example:
+     * <pre>
+     *     PluginMetrics pluginMetrics;
+     *     try {
+     *         pluginMetrics = context.pluginMetrics();
+     *     } catch (NoSuchMethodError | NoClassDefFoundError e) {
+     *         pluginMetrics = null;
+     *     }
+     * </pre>
+     *
+     * @return the pluginMetrics instance
+     * @since 4.1
+     */
+    PluginMetrics pluginMetrics();
 }

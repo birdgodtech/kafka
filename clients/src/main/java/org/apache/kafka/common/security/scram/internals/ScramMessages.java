@@ -16,8 +16,11 @@
  */
 package org.apache.kafka.common.security.scram.internals;
 
+import org.apache.kafka.common.utils.Utils;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -31,7 +34,7 @@ import javax.security.sasl.SaslException;
  */
 public class ScramMessages {
 
-    static abstract class AbstractScramMessage {
+    abstract static class AbstractScramMessage {
 
         static final String ALPHA = "[A-Za-z]+";
         static final String VALUE_SAFE = "[\\x01-\\x7F&&[^=,]]+";
@@ -112,7 +115,8 @@ public class ScramMessages {
         }
 
         public String clientFirstMessageBare() {
-            String extensionStr = extensions.toString();
+            String extensionStr = Utils.mkString(extensions.map(), "", "", "=", ",");
+
             if (extensionStr.isEmpty())
                 return String.format("n=%s,r=%s", saslName, nonce);
             else
@@ -151,7 +155,7 @@ public class ScramMessages {
                 if (this.iterations <= 0)
                     throw new SaslException("Invalid SCRAM server first message format: invalid iterations " + iterations);
             } catch (NumberFormatException e) {
-                throw new SaslException("Invalid SCRAM server first message format: invalid iterations");
+                throw new SaslException("Invalid SCRAM server first message format: invalid iterations", e);
             }
             this.nonce = matcher.group("nonce");
             String salt = matcher.group("salt");
@@ -172,7 +176,8 @@ public class ScramMessages {
             return iterations;
         }
         String toMessage() {
-            return String.format("r=%s,s=%s,i=%d", nonce, Base64.getEncoder().encodeToString(salt), iterations);
+            // Locale.ROOT: the iteration count must use ASCII digits regardless of the JVM's default locale
+            return String.format(Locale.ROOT, "r=%s,s=%s,i=%d", nonce, Base64.getEncoder().encodeToString(salt), iterations);
         }
     }
     /**

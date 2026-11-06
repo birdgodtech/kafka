@@ -46,17 +46,14 @@ class KeyValueIterators {
             throw new NoSuchElementException();
         }
 
-        @Override
-        public void remove() {
-        }
     }
 
     private static class EmptyWindowStoreIterator<V> extends EmptyKeyValueIterator<Long, V>
         implements WindowStoreIterator<V> {
     }
 
-    private static final KeyValueIterator EMPTY_ITERATOR = new EmptyKeyValueIterator();
-    private static final WindowStoreIterator EMPTY_WINDOW_STORE_ITERATOR = new EmptyWindowStoreIterator();
+    private static final KeyValueIterator<?, ?> EMPTY_ITERATOR = new EmptyKeyValueIterator<>();
+    private static final WindowStoreIterator<?> EMPTY_WINDOW_STORE_ITERATOR = new EmptyWindowStoreIterator<>();
 
 
     @SuppressWarnings("unchecked")

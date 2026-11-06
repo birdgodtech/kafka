@@ -16,28 +16,38 @@
  */
 package org.apache.kafka.streams.state.internals;
 
-import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.state.WindowBytesStoreSupplier;
 import org.apache.kafka.streams.state.WindowStore;
 
 public class RocksDbWindowBytesStoreSupplier implements WindowBytesStoreSupplier {
-    private final String name;
-    private final long retentionPeriod;
-    private final long segmentInterval;
-    private final long windowSize;
-    private final boolean retainDuplicates;
+    public enum WindowStoreTypes {
+        DEFAULT_WINDOW_STORE,
+        TIMESTAMPED_WINDOW_STORE,
+        TIMESTAMPED_WINDOW_STORE_WITH_HEADERS
+    }
 
-    public RocksDbWindowBytesStoreSupplier(final String name,
-                                           final long retentionPeriod,
-                                           final long segmentInterval,
-                                           final long windowSize,
-                                           final boolean retainDuplicates) {
+    protected final String name;
+    protected final long retentionPeriod;
+    protected final long segmentInterval;
+    protected final long windowSize;
+    protected final boolean retainDuplicates;
+    private final WindowStoreTypes windowStoreType;
+
+    public RocksDbWindowBytesStoreSupplier(
+        final String name,
+        final long retentionPeriod,
+        final long segmentInterval,
+        final long windowSize,
+        final boolean retainDuplicates,
+        final WindowStoreTypes windowStoreType
+    ) {
         this.name = name;
         this.retentionPeriod = retentionPeriod;
         this.segmentInterval = segmentInterval;
         this.windowSize = windowSize;
         this.retainDuplicates = retainDuplicates;
+        this.windowStoreType = windowStoreType;
     }
 
     @Override
@@ -47,18 +57,30 @@ public class RocksDbWindowBytesStoreSupplier implements WindowBytesStoreSupplier
 
     @Override
     public WindowStore<Bytes, byte[]> get() {
-        final RocksDBSegmentedBytesStore segmentedBytesStore = new RocksDBSegmentedBytesStore(
-                name,
-                retentionPeriod,
-                segmentInterval,
-                new WindowKeySchema()
-        );
-        return new RocksDBWindowStore<>(segmentedBytesStore,
-                Serdes.Bytes(),
-                Serdes.ByteArray(),
-                retainDuplicates,
-                windowSize);
-
+        switch (windowStoreType) {
+            case DEFAULT_WINDOW_STORE:
+                return new RocksDBWindowStore(
+                    new RocksDBSegmentedBytesStore(
+                        name,
+                        metricsScope(),
+                        retentionPeriod,
+                        segmentInterval,
+                        new WindowKeySchema()),
+                    retainDuplicates,
+                    windowSize);
+            case TIMESTAMPED_WINDOW_STORE:
+                return new RocksDBTimestampedWindowStore(
+                    new RocksDBTimestampedSegmentedBytesStore(
+                        name,
+                        metricsScope(),
+                        retentionPeriod,
+                        segmentInterval,
+                        new WindowKeySchema()),
+                    retainDuplicates,
+                    windowSize);
+            default:
+                throw new IllegalArgumentException("invalid window store type: " + windowStoreType);
+        }
     }
 
     @Override
@@ -67,8 +89,8 @@ public class RocksDbWindowBytesStoreSupplier implements WindowBytesStoreSupplier
     }
 
     @Override
-    public int segments() {
-        return (int) (retentionPeriod / segmentInterval) + 1;
+    public long segmentIntervalMs() {
+        return segmentInterval;
     }
 
     @Override
@@ -84,5 +106,17 @@ public class RocksDbWindowBytesStoreSupplier implements WindowBytesStoreSupplier
     @Override
     public long retentionPeriod() {
         return retentionPeriod;
+    }
+
+    @Override
+    public String toString() {
+        return "RocksDbWindowBytesStoreSupplier{" +
+                   "name='" + name + '\'' +
+                   ", retentionPeriod=" + retentionPeriod +
+                   ", segmentInterval=" + segmentInterval +
+                   ", windowSize=" + windowSize +
+                   ", retainDuplicates=" + retainDuplicates +
+                   ", windowStoreType=" + windowStoreType +
+                   '}';
     }
 }

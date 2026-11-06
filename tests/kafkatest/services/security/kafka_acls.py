@@ -13,63 +13,53 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from kafkatest.directory_layout.kafka_path import KafkaPathResolverMixin
+import time
 
-
-class ACLs(KafkaPathResolverMixin):
+class ACLs:
     def __init__(self, context):
         self.context = context
 
-    def set_acls(self, protocol, kafka, topic, group):
+    def add_cluster_acl(self, kafka, principal, additional_cluster_operations_to_grant = [], security_protocol=None):
+        """
+        :param kafka: Kafka cluster upon which ClusterAction ACL is created
+        :param principal: principal for which ClusterAction ACL is created
+        :param node: Node to use when determining connection settings
+        :param additional_cluster_operations_to_grant may be set to ['Alter', 'Create'] if the cluster is secured since these are required
+               to create SCRAM credentials and topics, respectively
+        :param security_protocol set it to explicitly determine whether we use client or broker credentials, otherwise
+                we use the client security protocol unless inter-broker security protocol is PLAINTEXT, in which case we use PLAINTEXT.
+                Then we use the broker's credentials if the selected security protocol matches the inter-broker security protocol,
+                otherwise we use the client's credentials.
+        """
         node = kafka.nodes[0]
-        setting = kafka.zk_connect_setting()
 
-        # Set server ACLs
-        kafka_principal = "User:CN=systemtest" if protocol == "SSL" else "User:kafka"
-        self.acls_command(node, ACLs.add_cluster_acl(setting, kafka_principal))
-        self.acls_command(node, ACLs.broker_read_acl(setting, "*", kafka_principal))
+        for operation in ['ClusterAction'] + additional_cluster_operations_to_grant:
+            cmd = "%(cmd_prefix)s --add --cluster --operation=%(operation)s --allow-principal=%(principal)s" % {
+                'cmd_prefix': kafka.kafka_acls_cmd_with_optional_security_settings(node, security_protocol),
+                'operation': operation,
+                'principal': principal
+            }
+            kafka.run_cli_tool(node, cmd)
 
-        # Set client ACLs
-        client_principal = "User:CN=systemtest" if protocol == "SSL" else "User:client"
-        self.acls_command(node, ACLs.produce_acl(setting, topic, client_principal))
-        self.acls_command(node, ACLs.consume_acl(setting, topic, group, client_principal))
+    def remove_cluster_acl(self, kafka, principal, additional_cluster_operations_to_remove = [], security_protocol=None):
+        """
+        :param kafka: Kafka cluster upon which ClusterAction ACL is deleted
+        :param principal: principal for which ClusterAction ACL is deleted
+        :param node: Node to use when determining connection settings
+        :param additional_cluster_operations_to_remove may be set to ['Alter', 'Create'] if the cluster is secured since these are required
+               to create SCRAM credentials and topics, respectively
+        :param security_protocol set it to explicitly determine whether we use client or broker credentials, otherwise
+                we use the client security protocol unless inter-broker security protocol is PLAINTEXT, in which case we use PLAINTEXT.
+                Then we use the broker's credentials if the selected security protocol matches the inter-broker security protocol,
+                otherwise we use the client's credentials.
+        """
+        node = kafka.nodes[0]
 
-    def acls_command(self, node, properties):
-        cmd = "%s %s" % (self.path.script("kafka-acls.sh", node), properties)
-        node.account.ssh(cmd)
-
-    @staticmethod
-    def add_cluster_acl(zk_connect, principal="User:kafka"):
-        return "--authorizer-properties zookeeper.connect=%(zk_connect)s --add --cluster " \
-               "--operation=ClusterAction --allow-principal=%(principal)s " % {
-            'zk_connect': zk_connect,
-            'principal': principal
-        }
-
-    @staticmethod
-    def broker_read_acl(zk_connect, topic, principal="User:kafka"):
-        return "--authorizer-properties zookeeper.connect=%(zk_connect)s --add --topic=%(topic)s " \
-               "--operation=Read --allow-principal=%(principal)s " % {
-            'zk_connect': zk_connect,
-            'topic': topic,
-            'principal': principal
-        }
-
-    @staticmethod
-    def produce_acl(zk_connect, topic, principal="User:client"):
-        return "--authorizer-properties zookeeper.connect=%(zk_connect)s --add --topic=%(topic)s " \
-               "--producer --allow-principal=%(principal)s " % {
-            'zk_connect': zk_connect,
-            'topic': topic,
-            'principal': principal
-        }
-
-    @staticmethod
-    def consume_acl(zk_connect, topic, group, principal="User:client"):
-        return "--authorizer-properties zookeeper.connect=%(zk_connect)s --add --topic=%(topic)s " \
-               "--group=%(group)s --consumer --allow-principal=%(principal)s " % {
-            'zk_connect': zk_connect,
-            'topic': topic,
-            'group': group,
-            'principal': principal
-        }
+        for operation in ['ClusterAction'] + additional_cluster_operations_to_remove:
+            cmd = "%(cmd_prefix)s --remove --force --cluster --operation=%(operation)s --allow-principal=%(principal)s" % {
+                'cmd_prefix': kafka.kafka_acls_cmd_with_optional_security_settings(node, security_protocol),
+                'operation': operation,
+                'principal': principal
+            }
+            kafka.logger.info(cmd)
+            kafka.run_cli_tool(node, cmd)

@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ducktape.mark import parametrize
+from ducktape.mark import matrix
 from ducktape.utils.util import wait_until
 from ducktape.mark.resource import cluster
 
 from kafkatest.services.zookeeper import ZookeeperService
-from kafkatest.services.kafka import KafkaService
+from kafkatest.services.kafka import KafkaService, quorum
 from kafkatest.services.verifiable_producer import VerifiableProducer
 from kafkatest.services.console_consumer import ConsoleConsumer
 from kafkatest.tests.produce_consume_validate import ProduceConsumeValidateTest
@@ -29,39 +29,41 @@ class CompressionTest(ProduceConsumeValidateTest):
     """
     These tests validate produce / consume for compressed topics.
     """
+    COMPRESSION_TYPES = ["snappy", "gzip", "lz4", "zstd", "none"]
 
     def __init__(self, test_context):
         """:type test_context: ducktape.tests.test.TestContext"""
         super(CompressionTest, self).__init__(test_context=test_context)
 
         self.topic = "test_topic"
-        self.zk = ZookeeperService(test_context, num_nodes=1)
+        self.zk = ZookeeperService(test_context, num_nodes=1) if quorum.for_test(test_context) == quorum.zk else None
         self.kafka = KafkaService(test_context, num_nodes=1, zk=self.zk, topics={self.topic: {
                                                                     "partitions": 10,
                                                                     "replication-factor": 1}})
         self.num_partitions = 10
         self.timeout_sec = 60
         self.producer_throughput = 1000
-        self.num_producers = 4
+        self.num_producers = len(self.COMPRESSION_TYPES)
         self.messages_per_producer = 1000
         self.num_consumers = 1
 
     def setUp(self):
-        self.zk.start()
+        if self.zk:
+            self.zk.start()
 
     def min_cluster_size(self):
         # Override this since we're adding services outside of the constructor
         return super(CompressionTest, self).min_cluster_size() + self.num_producers + self.num_consumers
 
-    @cluster(num_nodes=7)
-    @parametrize(compression_types=["snappy","gzip","lz4","none"])
-    def test_compressed_topic(self, compression_types):
+    @cluster(num_nodes=8)
+    @matrix(compression_types=[COMPRESSION_TYPES], metadata_quorum=quorum.all_non_upgrade)
+    def test_compressed_topic(self, compression_types, metadata_quorum=quorum.zk):
         """Test produce => consume => validate for compressed topics
         Setup: 1 zk, 1 kafka node, 1 topic with partitions=10, replication-factor=1
 
         compression_types parameter gives a list of compression types (or no compression if
-        "none"). Each producer in a VerifiableProducer group (num_producers = 4) will use a
-        compression type from the list based on producer's index in the group.
+        "none"). Each producer in a VerifiableProducer group (num_producers = number of compression
+        types) will use a compression type from the list based on producer's index in the group.
 
             - Produce messages in the background
             - Consume messages in the background

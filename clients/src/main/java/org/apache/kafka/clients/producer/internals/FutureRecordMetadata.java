@@ -16,12 +16,13 @@
  */
 package org.apache.kafka.clients.producer.internals;
 
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.utils.Time;
+
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-
-import org.apache.kafka.clients.producer.RecordMetadata;
 
 /**
  * The future result of a record send
@@ -29,21 +30,21 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 public final class FutureRecordMetadata implements Future<RecordMetadata> {
 
     private final ProduceRequestResult result;
-    private final long relativeOffset;
+    private final int batchIndex;
     private final long createTimestamp;
-    private final Long checksum;
     private final int serializedKeySize;
     private final int serializedValueSize;
+    private final Time time;
     private volatile FutureRecordMetadata nextRecordMetadata = null;
 
-    public FutureRecordMetadata(ProduceRequestResult result, long relativeOffset, long createTimestamp,
-                                Long checksum, int serializedKeySize, int serializedValueSize) {
+    public FutureRecordMetadata(ProduceRequestResult result, int batchIndex, long createTimestamp, int serializedKeySize,
+                                int serializedValueSize, Time time) {
         this.result = result;
-        this.relativeOffset = relativeOffset;
+        this.batchIndex = batchIndex;
         this.createTimestamp = createTimestamp;
-        this.checksum = checksum;
         this.serializedKeySize = serializedKeySize;
         this.serializedValueSize = serializedValueSize;
+        this.time = time;
     }
 
     @Override
@@ -67,13 +68,14 @@ public final class FutureRecordMetadata implements Future<RecordMetadata> {
     @Override
     public RecordMetadata get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
         // Handle overflow.
-        long now = System.currentTimeMillis();
-        long deadline = Long.MAX_VALUE - timeout < now ? Long.MAX_VALUE : now + timeout;
+        long now = time.milliseconds();
+        long timeoutMillis = unit.toMillis(timeout);
+        long deadline = Long.MAX_VALUE - timeoutMillis < now ? Long.MAX_VALUE : now + timeoutMillis;
         boolean occurred = this.result.await(timeout, unit);
-        if (nextRecordMetadata != null)
-            return nextRecordMetadata.get(deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
         if (!occurred)
-            throw new TimeoutException("Timeout after waiting for " + TimeUnit.MILLISECONDS.convert(timeout, unit) + " ms.");
+            throw new TimeoutException("Timeout after waiting for " + timeoutMillis + " ms.");
+        if (nextRecordMetadata != null)
+            return nextRecordMetadata.get(deadline - time.milliseconds(), TimeUnit.MILLISECONDS);
         return valueOrError();
     }
 
@@ -90,21 +92,18 @@ public final class FutureRecordMetadata implements Future<RecordMetadata> {
     }
 
     RecordMetadata valueOrError() throws ExecutionException {
-        if (this.result.error() != null)
-            throw new ExecutionException(this.result.error());
+        RuntimeException exception = this.result.error(batchIndex);
+        if (exception != null)
+            throw new ExecutionException(exception);
         else
             return value();
-    }
-
-    Long checksumOrNull() {
-        return this.checksum;
     }
 
     RecordMetadata value() {
         if (nextRecordMetadata != null)
             return nextRecordMetadata.value();
-        return new RecordMetadata(result.topicPartition(), this.result.baseOffset(), this.relativeOffset,
-                                  timestamp(), this.checksum, this.serializedKeySize, this.serializedValueSize);
+        return new RecordMetadata(result.topicPartition(), this.result.baseOffset(), this.batchIndex,
+                                  timestamp(), this.serializedKeySize, this.serializedValueSize);
     }
 
     private long timestamp() {

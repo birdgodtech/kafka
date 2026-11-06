@@ -17,25 +17,28 @@
 package org.apache.kafka.server.policy;
 
 import org.apache.kafka.common.Configurable;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.errors.PolicyViolationException;
 
 import java.util.Map;
+import java.util.Objects;
 
 /**
- * An interface for enforcing a policy on alter configs requests.
+ * <p>An interface for enforcing a policy on alter configs requests.
  *
- * Common use cases are requiring that the replication factor, min.insync.replicas and/or retention settings for a
+ * <p>Common use cases are requiring that the replication factor, <code>min.insync.replicas</code> and/or retention settings for a
  * topic remain within an allowable range.
  *
- * If <code>alter.config.policy.class.name</code> is defined, Kafka will create an instance of the specified class
+ * <p>If <code>alter.config.policy.class.name</code> is defined, Kafka will create an instance of the specified class
  * using the default constructor and will then pass the broker configs to its <code>configure()</code> method. During
  * broker shutdown, the <code>close()</code> method will be invoked so that resources can be released (if necessary).
  */
+@InterfaceAudience.Public
 public interface AlterConfigPolicy extends Configurable, AutoCloseable {
 
     /**
-     * Class containing the create request parameters.
+     * Class containing the alter configs request parameters.
      */
     class RequestMetadata {
 
@@ -64,6 +67,19 @@ public interface AlterConfigPolicy extends Configurable, AutoCloseable {
         }
 
         @Override
+        public int hashCode() {
+            return Objects.hash(resource, configs);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if ((o == null) || (!o.getClass().equals(getClass()))) return false;
+            RequestMetadata other = (RequestMetadata) o;
+            return resource.equals(other.resource) &&
+                configs.equals(other.configs);
+        }
+
+        @Override
         public String toString() {
             return "AlterConfigPolicy.RequestMetadata(resource=" + resource +
                     ", configs=" + configs + ")";
@@ -77,8 +93,7 @@ public interface AlterConfigPolicy extends Configurable, AutoCloseable {
      * Clients will receive the POLICY_VIOLATION error code along with the exception's message. Note that validation
      * failure only affects the relevant resource, other resources in the request will still be processed.
      *
-     * @param requestMetadata the alter configs request parameters for the provided resource (topic is the only resource
-     *                        type whose configs can be updated currently).
+     * @param requestMetadata the alter configs request parameters for the provided resource.
      * @throws PolicyViolationException if the request parameters do not satisfy this policy.
      */
     void validate(RequestMetadata requestMetadata) throws PolicyViolationException;

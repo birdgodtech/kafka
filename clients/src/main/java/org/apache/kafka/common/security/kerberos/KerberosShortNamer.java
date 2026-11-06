@@ -18,7 +18,6 @@ package org.apache.kafka.common.security.kerberos;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -33,7 +32,7 @@ public class KerberosShortNamer {
     /**
      * A pattern for parsing a auth_to_local rule.
      */
-    private static final Pattern RULE_PARSER = Pattern.compile("((DEFAULT)|((RULE:\\[(\\d*):([^\\]]*)](\\(([^)]*)\\))?(s/([^/]*)/([^/]*)/(g)?)?/?(L)?)))");
+    private static final Pattern RULE_PARSER = Pattern.compile("((DEFAULT)|((RULE:\\[(\\d*):([^\\]]*)](\\(([^)]*)\\))?(s/([^/]*)/([^/]*)/(g)?)?/?(L|U)?)))");
 
     /* Rules for the translation of the principal name into an operating system name */
     private final List<KerberosRule> principalToLocalRules;
@@ -43,7 +42,7 @@ public class KerberosShortNamer {
     }
 
     public static KerberosShortNamer fromUnparsedRules(String defaultRealm, List<String> principalToLocalRules) {
-        List<String> rules = principalToLocalRules == null ? Collections.singletonList("DEFAULT") : principalToLocalRules;
+        List<String> rules = principalToLocalRules == null ? List.of("DEFAULT") : principalToLocalRules;
         return new KerberosShortNamer(parseRules(defaultRealm, rules));
     }
 
@@ -66,7 +65,8 @@ public class KerberosShortNamer {
                         matcher.group(10),
                         matcher.group(11),
                         "g".equals(matcher.group(12)),
-                        "L".equals(matcher.group(13))));
+                        "L".equals(matcher.group(13)),
+                        "U".equals(matcher.group(13))));
 
             }
         }

@@ -21,31 +21,31 @@ import org.apache.kafka.connect.data.Values;
 import org.apache.kafka.connect.header.ConnectHeaders;
 import org.apache.kafka.connect.header.Header;
 import org.apache.kafka.connect.header.Headers;
-import org.junit.Before;
-import org.junit.Test;
 
-import java.util.Collections;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNotSame;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class SourceRecordTest {
 
-    private static final Map<String, ?> SOURCE_PARTITION = Collections.singletonMap("src", "abc");
-    private static final Map<String, ?> SOURCE_OFFSET = Collections.singletonMap("offset", "1");
+    private static final Map<String, ?> SOURCE_PARTITION = Map.of("src", "abc");
+    private static final Map<String, ?> SOURCE_OFFSET = Map.of("offset", "1");
     private static final String TOPIC_NAME = "myTopic";
     private static final Integer PARTITION_NUMBER = 0;
     private static final Long KAFKA_TIMESTAMP = 0L;
 
     private SourceRecord record;
 
-    @Before
+    @BeforeEach
     public void beforeEach() {
         record = new SourceRecord(SOURCE_PARTITION, SOURCE_OFFSET, TOPIC_NAME, PARTITION_NUMBER, Schema.STRING_SCHEMA, "key",
                                   Schema.BOOLEAN_SCHEMA, false, KAFKA_TIMESTAMP, null);
@@ -62,7 +62,7 @@ public class SourceRecordTest {
     }
 
     @Test
-    public void shouldCreateSinkRecordWithEmtpyHeaders() {
+    public void shouldCreateSinkRecordWithEmptyHeaders() {
         assertEquals(SOURCE_PARTITION, record.sourcePartition());
         assertEquals(SOURCE_OFFSET, record.sourceOffset());
         assertEquals(TOPIC_NAME, record.topic());

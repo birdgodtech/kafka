@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.streams.state;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.streams.processor.StateStore;
 
 import java.util.Map;
@@ -24,6 +25,7 @@ import java.util.Map;
  * Build a {@link StateStore} wrapped with optional caching and logging.
  * @param <T>  the type of store to build
  */
+@InterfaceAudience.Public
 public interface StoreBuilder<T extends StateStore> {
 
     /**
@@ -31,6 +33,12 @@ public interface StoreBuilder<T extends StateStore> {
      * @return  this
      */
     StoreBuilder<T> withCachingEnabled();
+
+    /**
+     * Disable caching on the store.
+     * @return  this
+     */
+    StoreBuilder<T> withCachingDisabled();
 
     /**
      * Maintain a changelog for any changes made to the store.
@@ -54,7 +62,6 @@ public interface StoreBuilder<T extends StateStore> {
      * @return the built {@link StateStore}
      */
     T build();
-
 
     /**
      * Returns a Map containing any log configs that will be used when creating the changelog for the {@link StateStore}.

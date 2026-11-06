@@ -17,16 +17,14 @@
 
 package org.apache.kafka.common.resource;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Objects;
 
 /**
  * Represents a cluster resource with a tuple of (type, name).
- *
- * The API for this class is still evolving and we may break compatibility in minor releases, if necessary.
  */
-@InterfaceStability.Evolving
+@InterfaceAudience.Public
 public class Resource {
     private final ResourceType resourceType;
     private final String name;
@@ -34,12 +32,12 @@ public class Resource {
     /**
      * The name of the CLUSTER resource.
      */
-    public final static String CLUSTER_NAME = "kafka-cluster";
+    public static final String CLUSTER_NAME = "kafka-cluster";
 
     /**
      * A resource representing the whole cluster.
      */
-    public final static Resource CLUSTER = new Resource(ResourceType.CLUSTER, CLUSTER_NAME);
+    public static final Resource CLUSTER = new Resource(ResourceType.CLUSTER, CLUSTER_NAME);
 
     /**
      * Create an instance of this class with the provided parameters.
@@ -68,16 +66,9 @@ public class Resource {
         return name;
     }
 
-    /**
-     * Create a filter which matches only this Resource.
-     */
-    public ResourceFilter toFilter() {
-        return new ResourceFilter(resourceType, name);
-    }
-
     @Override
     public String toString() {
-        return "(resourceType=" + resourceType + ", name=" + ((name == null) ? "<any>" : name) + ")";
+        return "(resourceType=" + resourceType + ", name=" + name + ")";
     }
 
     /**

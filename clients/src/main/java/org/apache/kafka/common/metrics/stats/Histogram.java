@@ -14,8 +14,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.metrics.stats;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
+import java.util.Arrays;
+
+@InterfaceAudience.Public
 public class Histogram {
 
     private final BinScheme binScheme;
@@ -55,8 +61,7 @@ public class Histogram {
     }
 
     public void clear() {
-        for (int i = 0; i < this.hist.length; i++)
-            this.hist[i] = 0.0f;
+        Arrays.fill(this.hist, 0.0f);
         this.count = 0;
     }
 
@@ -115,7 +120,6 @@ public class Histogram {
     public static class ConstantBinScheme implements BinScheme {
         private static final int MIN_BIN_NUMBER = 0;
         private final double min;
-        private final double max;
         private final int bins;
         private final double bucketWidth;
         private final int maxBinNumber;
@@ -131,7 +135,6 @@ public class Histogram {
             if (bins < 2)
                 throw new IllegalArgumentException("Must have at least 2 bins.");
             this.min = min;
-            this.max = max;
             this.bins = bins;
             this.bucketWidth = (max - min) / bins;
             this.maxBinNumber = bins - 1;
@@ -156,10 +159,7 @@ public class Histogram {
             if (binNumber < MIN_BIN_NUMBER) {
                 return MIN_BIN_NUMBER;
             }
-            if (binNumber > maxBinNumber) {
-                return maxBinNumber;
-            }
-            return binNumber;
+            return Math.min(binNumber, maxBinNumber);
         }
     }
 

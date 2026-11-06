@@ -17,34 +17,59 @@
 
 package org.apache.kafka.common;
 
-import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * A class containing leadership, replicas and ISR information for a topic partition.
  */
+@InterfaceAudience.Public
 public class TopicPartitionInfo {
     private final int partition;
     private final Node leader;
     private final List<Node> replicas;
     private final List<Node> isr;
+    private final List<Node> elr;
+    private final List<Node> lastKnownElr;
 
     /**
      * Create an instance of this class with the provided parameters.
      *
      * @param partition the partition id
-     * @param leader the leader of the partition or {@link Node#noNode()} if there is none.
+     * @param leader the leader of the partition or null if there is none.
      * @param replicas the replicas of the partition in the same order as the replica assignment (the preferred replica
      *                 is the head of the list)
      * @param isr the in-sync replicas
+     * @param elr the eligible leader replicas
+     * @param lastKnownElr the last known eligible leader replicas.
      */
+    public TopicPartitionInfo(
+        int partition,
+        Node leader,
+        List<Node> replicas,
+        List<Node> isr,
+        List<Node> elr,
+        List<Node> lastKnownElr
+    ) {
+        this.partition = partition;
+        this.leader = leader;
+        this.replicas = Collections.unmodifiableList(replicas);
+        this.isr = Collections.unmodifiableList(isr);
+        this.elr = Collections.unmodifiableList(elr);
+        this.lastKnownElr = Collections.unmodifiableList(lastKnownElr);
+    }
+
     public TopicPartitionInfo(int partition, Node leader, List<Node> replicas, List<Node> isr) {
         this.partition = partition;
         this.leader = leader;
         this.replicas = Collections.unmodifiableList(replicas);
         this.isr = Collections.unmodifiableList(isr);
+        this.elr = null;
+        this.lastKnownElr = null;
     }
 
     /**
@@ -78,9 +103,26 @@ public class TopicPartitionInfo {
         return isr;
     }
 
+    /**
+     * Return the eligible leader replicas of the partition. Note that the ordering of the result is unspecified.
+     */
+    public List<Node> elr() {
+        return elr;
+    }
+
+    /**
+     * Return the last known eligible leader replicas of the partition. Note that the ordering of the result is unspecified.
+     */
+    public List<Node> lastKnownElr() {
+        return lastKnownElr;
+    }
+
     public String toString() {
+        String elrString = elr != null ? elr.stream().map(Node::toString).collect(Collectors.joining(", ")) : "N/A";
+        String lastKnownElrString = lastKnownElr != null ? lastKnownElr.stream().map(Node::toString).collect(Collectors.joining(", ")) : "N/A";
         return "(partition=" + partition + ", leader=" + leader + ", replicas=" +
-            Utils.join(replicas, ", ") + ", isr=" + Utils.join(isr, ", ") + ")";
+            replicas.stream().map(Node::toString).collect(Collectors.joining(", ")) + ", isr=" + isr.stream().map(Node::toString).collect(Collectors.joining(", ")) +
+            ", elr=" + elrString + ", lastKnownElr=" + lastKnownElrString + ")";
     }
 
     @Override
@@ -90,10 +132,12 @@ public class TopicPartitionInfo {
 
         TopicPartitionInfo that = (TopicPartitionInfo) o;
 
-        if (partition != that.partition) return false;
-        if (leader != null ? !leader.equals(that.leader) : that.leader != null) return false;
-        if (replicas != null ? !replicas.equals(that.replicas) : that.replicas != null) return false;
-        return isr != null ? isr.equals(that.isr) : that.isr == null;
+        return partition == that.partition &&
+            Objects.equals(leader, that.leader) &&
+            Objects.equals(replicas, that.replicas) &&
+            Objects.equals(isr, that.isr) &&
+            Objects.equals(elr, that.elr) &&
+            Objects.equals(lastKnownElr, that.lastKnownElr);
     }
 
     @Override
@@ -102,6 +146,8 @@ public class TopicPartitionInfo {
         result = 31 * result + (leader != null ? leader.hashCode() : 0);
         result = 31 * result + (replicas != null ? replicas.hashCode() : 0);
         result = 31 * result + (isr != null ? isr.hashCode() : 0);
+        result = 31 * result + (elr != null ? elr.hashCode() : 0);
+        result = 31 * result + (lastKnownElr != null ? lastKnownElr.hashCode() : 0);
         return result;
     }
 }

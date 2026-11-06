@@ -1,0 +1,813 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.streams.state.internals;
+
+import org.apache.kafka.common.IsolationLevel;
+import org.apache.kafka.common.MetricName;
+import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeaders;
+import org.apache.kafka.common.metrics.JmxReporter;
+import org.apache.kafka.common.metrics.KafkaMetric;
+import org.apache.kafka.common.metrics.KafkaMetricsContext;
+import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.MetricsContext;
+import org.apache.kafka.common.metrics.Sensor;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.serialization.Serde;
+import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.common.serialization.Serializer;
+import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.common.utils.Bytes;
+import org.apache.kafka.common.utils.MockTime;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.internals.LogContext;
+import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.processor.TaskId;
+import org.apache.kafka.streams.processor.internals.InternalProcessorContext;
+import org.apache.kafka.streams.processor.internals.ProcessorRecordContext;
+import org.apache.kafka.streams.processor.internals.ProcessorStateManager;
+import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
+import org.apache.kafka.streams.state.KeyValueIterator;
+import org.apache.kafka.streams.state.KeyValueStore;
+import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
+import org.apache.kafka.test.InternalMockProcessorContext;
+import org.apache.kafka.test.KeyValueIteratorStub;
+import org.apache.kafka.test.MockRecordCollector;
+import org.apache.kafka.test.StreamsTestUtils;
+import org.apache.kafka.test.TestUtils;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
+import static org.apache.kafka.common.utils.Utils.mkEntry;
+import static org.apache.kafka.common.utils.Utils.mkMap;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.STRICT_STUBS)
+public class MeteredKeyValueStoreTest {
+
+    private static final String APPLICATION_ID = "test-app";
+    private static final String STORE_NAME = "store-name";
+    private static final String STORE_TYPE = "scope";
+    private static final String STORE_LEVEL_GROUP = "stream-state-metrics";
+    private static final String CHANGELOG_TOPIC = "changelog-topic";
+    private static final String THREAD_ID_TAG_KEY = "thread-id";
+    private static final String KEY = "key";
+    private static final Bytes KEY_BYTES = Bytes.wrap(KEY.getBytes());
+    private static final String VALUE = "value";
+    private static final byte[] VALUE_BYTES = VALUE.getBytes();
+    private static final KeyValue<Bytes, byte[]> BYTE_KEY_VALUE_PAIR = KeyValue.pair(KEY_BYTES, VALUE_BYTES);
+
+    private final String threadId = Thread.currentThread().getName();
+    private final TaskId taskId = new TaskId(0, 0, "My-Topology");
+
+    @Mock
+    private KeyValueStore<Bytes, byte[]> inner;
+    @Mock
+    private InternalProcessorContext<?, ?> context;
+
+    private MeteredKeyValueStore<String, String> metered;
+    private final Metrics metrics = new Metrics();
+    private Map<String, String> tags;
+    private MockTime mockTime;
+
+    public void setUpWithoutContext() {
+        final MockTime mockTime = new MockTime();
+        this.mockTime = mockTime;
+        metered = new MeteredKeyValueStore<>(
+                inner,
+                STORE_TYPE,
+                mockTime,
+                Serdes.String(),
+                Serdes.String()
+        );
+        metrics.config().recordLevel(Sensor.RecordingLevel.DEBUG);
+        tags = mkMap(
+                mkEntry(THREAD_ID_TAG_KEY, threadId),
+                mkEntry("task-id", taskId.toString()),
+                mkEntry(STORE_TYPE + "-state-id", STORE_NAME)
+        );
+    }
+
+    private void setUp() {
+        setUpWithoutContext();
+        metrics.config().recordLevel(Sensor.RecordingLevel.DEBUG);
+        when(context.applicationId()).thenReturn(APPLICATION_ID);
+        when(context.metrics()).thenReturn(
+            new StreamsMetricsImpl(metrics, "test", mockTime)
+        );
+        when(context.taskId()).thenReturn(taskId);
+        when(context.changelogFor(STORE_NAME)).thenReturn(CHANGELOG_TOPIC);
+        when(inner.name()).thenReturn(STORE_NAME);
+    }
+
+    private void init() {
+        metered.init(context, metered);
+    }
+
+    @Test
+    public void shouldDelegateInit() {
+        setUp();
+        final MeteredKeyValueStore<String, String> outer = new MeteredKeyValueStore<>(
+            inner,
+            STORE_TYPE,
+            new MockTime(),
+            Serdes.String(),
+            Serdes.String()
+        );
+        doNothing().when(inner).init(context, outer);
+        outer.init(context, outer);
+    }
+
+    @Test
+    public void shouldPassChangelogTopicNameToStateStoreSerde() {
+        setUp();
+        doShouldPassChangelogTopicNameToStateStoreSerde(CHANGELOG_TOPIC);
+    }
+
+    @Test
+    public void shouldPassDefaultChangelogTopicNameToStateStoreSerdeIfLoggingDisabled() {
+        setUp();
+        final String defaultChangelogTopicName = ProcessorStateManager.storeChangelogTopic(APPLICATION_ID, STORE_NAME, taskId.topologyName());
+        when(context.changelogFor(STORE_NAME)).thenReturn(null);
+        doShouldPassChangelogTopicNameToStateStoreSerde(defaultChangelogTopicName);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void doShouldPassChangelogTopicNameToStateStoreSerde(final String topic) {
+        final Serde<String> keySerde = mock(Serde.class);
+        final Serializer<String> keySerializer = mock(Serializer.class);
+        final Serde<String> valueSerde = mock(Serde.class);
+        final Deserializer<String> valueDeserializer = mock(Deserializer.class);
+        final Serializer<String> valueSerializer = mock(Serializer.class);
+        when(keySerde.serializer()).thenReturn(keySerializer);
+        when(keySerializer.serialize(topic, new RecordHeaders(), KEY)).thenReturn(KEY.getBytes());
+        when(valueSerde.deserializer()).thenReturn(valueDeserializer);
+        when(valueDeserializer.deserialize(topic, new RecordHeaders(), VALUE_BYTES)).thenReturn(VALUE);
+        when(valueSerde.serializer()).thenReturn(valueSerializer);
+        when(valueSerializer.serialize(topic, new RecordHeaders(), VALUE)).thenReturn(VALUE_BYTES);
+        when(context.headers()).thenReturn(new RecordHeaders());
+        when(inner.get(KEY_BYTES)).thenReturn(VALUE_BYTES);
+        metered = new MeteredKeyValueStore<>(
+            inner,
+            STORE_TYPE,
+            new MockTime(),
+            keySerde,
+            valueSerde
+        );
+        metered.init(context, metered);
+
+        metered.get(KEY);
+        metered.put(KEY, VALUE);
+    }
+
+    @Test
+    public void testMetrics() {
+        setUp();
+        init();
+        final JmxReporter reporter = new JmxReporter();
+        final MetricsContext metricsContext = new KafkaMetricsContext("kafka.streams");
+        reporter.contextChange(metricsContext);
+
+        metrics.addReporter(reporter);
+        assertTrue(reporter.containsMbean(String.format(
+            "kafka.streams:type=%s,%s=%s,task-id=%s,%s-state-id=%s",
+            STORE_LEVEL_GROUP,
+            THREAD_ID_TAG_KEY,
+            threadId,
+            taskId,
+            STORE_TYPE,
+            STORE_NAME
+        )));
+    }
+
+    @Test
+    public void shouldRecordRestoreLatencyOnRecordRestoreTime() {
+        setUp();
+        doNothing().when(inner).init(context, metered);
+
+        init();
+
+        final long restoreTimeNs = 1000L;
+        metered.recordRestoreTime(restoreTimeNs);
+
+        // it suffices to verify one restore metric since all restore metrics are recorded by the same sensor
+        // and the sensor is tested elsewhere
+        final KafkaMetric metric = metric("restore-latency-max");
+        assertEquals((double) restoreTimeNs, (Double) metric.metricValue());
+    }
+
+    @Test
+    public void shouldWriteBytesToInnerStoreAndRecordPutMetric() {
+        setUp();
+        doNothing().when(inner).put(KEY_BYTES, VALUE_BYTES);
+        init();
+
+        metered.put(KEY, VALUE);
+
+        final KafkaMetric metric = metric("put-rate");
+        assertTrue((Double) metric.metricValue() > 0);
+    }
+
+    @Test
+    public void shouldGetBytesFromInnerStoreAndReturnGetMetric() {
+        setUp();
+        when(inner.get(KEY_BYTES)).thenReturn(VALUE_BYTES);
+        init();
+
+        assertEquals(VALUE, metered.get(KEY));
+
+        final KafkaMetric metric = metric("get-rate");
+        assertTrue((Double) metric.metricValue() > 0);
+    }
+
+    @Test
+    public void shouldPutIfAbsentAndRecordPutIfAbsentMetric() {
+        setUp();
+        when(inner.putIfAbsent(KEY_BYTES, VALUE_BYTES)).thenReturn(null);
+        init();
+
+        metered.putIfAbsent(KEY, VALUE);
+
+        final KafkaMetric metric = metric("put-if-absent-rate");
+        assertTrue((Double) metric.metricValue() > 0);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldPutAllToInnerStoreAndRecordPutAllMetric() {
+        setUp();
+        doNothing().when(inner).putAll(any(List.class));
+        init();
+
+        metered.putAll(Collections.singletonList(KeyValue.pair(KEY, VALUE)));
+
+        final KafkaMetric metric = metric("put-all-rate");
+        assertTrue((Double) metric.metricValue() > 0);
+    }
+
+    @Test
+    public void shouldDeleteFromInnerStoreAndRecordDeleteMetric() {
+        setUp();
+        when(inner.delete(KEY_BYTES)).thenReturn(VALUE_BYTES);
+        init();
+
+        metered.delete(KEY);
+
+        final KafkaMetric metric = metric("delete-rate");
+        assertTrue((Double) metric.metricValue() > 0);
+    }
+
+    @Test
+    public void shouldGetRangeFromInnerStoreAndRecordRangeMetric() {
+        setUp();
+        when(inner.range(KEY_BYTES, KEY_BYTES))
+            .thenReturn(new KeyValueIteratorStub<>(Collections.singletonList(BYTE_KEY_VALUE_PAIR).iterator()));
+        init();
+
+        final KeyValueIterator<String, String> iterator = metered.range(KEY, KEY);
+        assertEquals(VALUE, iterator.next().value);
+        assertFalse(iterator.hasNext());
+        iterator.close();
+
+        final KafkaMetric metric = metric("range-rate");
+        assertTrue((Double) metric.metricValue() > 0);
+    }
+
+    @Test
+    public void shouldGetAllFromInnerStoreAndRecordAllMetric() {
+        setUp();
+        when(inner.all()).thenReturn(new KeyValueIteratorStub<>(Collections.singletonList(BYTE_KEY_VALUE_PAIR).iterator()));
+        init();
+
+        final KeyValueIterator<String, String> iterator = metered.all();
+        assertEquals(VALUE, iterator.next().value);
+        assertFalse(iterator.hasNext());
+        iterator.close();
+
+        final KafkaMetric metric = metric(new MetricName("all-rate", STORE_LEVEL_GROUP, "", tags));
+        assertTrue((Double) metric.metricValue() > 0);
+    }
+
+    @Test
+    public void shouldFlushInnerWhenCommitTimeRecords() {
+        setUp();
+        doNothing().when(inner).commit(Map.of());
+        init();
+
+        metered.commit(Map.of());
+
+        final KafkaMetric commitMetric = metric("commit-rate");
+        assertTrue((Double) commitMetric.metricValue() > 0);
+    }
+
+    private interface CachedKeyValueStore extends KeyValueStore<Bytes, byte[]>, CachedStateStore<byte[], byte[]> { }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldSetFlushListenerOnWrappedCachingStore() {
+        setUpWithoutContext();
+        final CachedKeyValueStore cachedKeyValueStore = mock(CachedKeyValueStore.class);
+
+        when(cachedKeyValueStore.setFlushListener(any(CacheFlushListener.class), eq(false))).thenReturn(true);
+
+        metered = new MeteredKeyValueStore<>(
+            cachedKeyValueStore,
+            STORE_TYPE,
+            new MockTime(),
+            Serdes.String(),
+            Serdes.String()
+        );
+        assertTrue(metered.setFlushListener(null, false));
+    }
+
+    @Test
+    public void shouldPassRecordHeadersToValueDeserializerWhenFlushListenerIsSet() {
+        final String headerKey = "flush";
+        final Deserializer<String> valueDeserializer = mock(Deserializer.class);
+        final Serde<String> valueSerde = Serdes.serdeFrom(Serdes.String().serializer(), valueDeserializer);
+        when(valueDeserializer.deserialize(anyString(), any(Headers.class), any(byte[].class))).thenReturn(VALUE);
+
+        final StreamsMetricsImpl streamsMetrics =
+            new StreamsMetricsImpl(new Metrics(), "test", new MockTime());
+        final InternalMockProcessorContext<?, ?> processorContext = new InternalMockProcessorContext<>(
+            TestUtils.tempDirectory(),
+            Serdes.String(),
+            Serdes.String(),
+            streamsMetrics,
+            new StreamsConfig(StreamsTestUtils.getStreamsConfig()),
+            MockRecordCollector::new,
+            new ThreadCache(new LogContext("testCache "), 1024L, streamsMetrics),
+            Time.SYSTEM
+        );
+
+        final InMemoryKeyValueStore innerStore = new InMemoryKeyValueStore(STORE_NAME);
+        final CachingKeyValueStore cachingStore = new CachingKeyValueStore(innerStore);
+        final MeteredKeyValueStore<String, String> meteredStore = new MeteredKeyValueStore<>(
+            cachingStore,
+            STORE_TYPE,
+            new MockTime(),
+            Serdes.String(),
+            valueSerde
+        );
+        meteredStore.init(processorContext, meteredStore);
+        assertTrue(meteredStore.setFlushListener(record -> { }, false));
+
+        final RecordHeaders headers = new RecordHeaders();
+        headers.add(headerKey, "new".getBytes(StandardCharsets.UTF_8));
+
+        processorContext.setRecordContext(new ProcessorRecordContext(0L, 0L, 0, "topic", headers));
+        meteredStore.put(KEY, VALUE);
+        meteredStore.commit(Map.of());
+
+        final ArgumentCaptor<Headers> headersCaptor = ArgumentCaptor.forClass(Headers.class);
+        verify(valueDeserializer).deserialize(anyString(), headersCaptor.capture(), any(byte[].class));
+
+        final Header capturedLastHeader = headersCaptor.getValue().lastHeader(headerKey);
+        assertNotNull(capturedLastHeader);
+        assertEquals("new", new String(capturedLastHeader.value(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    public void shouldNotThrowNullPointerExceptionIfGetReturnsNull() {
+        setUp();
+        when(inner.get(Bytes.wrap("a".getBytes()))).thenReturn(null);
+
+        init();
+        assertNull(metered.get("a"));
+    }
+
+    @Test
+    public void shouldNotSetFlushListenerOnWrappedNoneCachingStore() {
+        setUpWithoutContext();
+        assertFalse(metered.setFlushListener(null, false));
+    }
+
+    @Test
+    public void shouldRemoveMetricsOnClose() {
+        setUp();
+        doNothing().when(inner).close();
+        init(); // replays "inner"
+
+        // There's always a "count" metric registered
+        assertFalse(storeMetrics().isEmpty());
+        metered.close();
+        assertTrue(storeMetrics().isEmpty());
+    }
+
+    @Test
+    public void shouldRemoveMetricsEvenIfWrappedStoreThrowsOnClose() {
+        setUp();
+        doThrow(new RuntimeException("Oops!")).when(inner).close();
+        init(); // replays "inner"
+
+        assertFalse(storeMetrics().isEmpty());
+        assertThrows(RuntimeException.class, metered::close);
+        assertTrue(storeMetrics().isEmpty());
+    }
+
+    @Test
+    public void shouldThrowNullPointerOnGetIfKeyIsNull() {
+        setUpWithoutContext();
+        assertThrows(NullPointerException.class, () -> metered.get(null));
+    }
+
+    @Test
+    public void shouldThrowNullPointerOnPutIfKeyIsNull() {
+        setUpWithoutContext();
+        assertThrows(NullPointerException.class, () -> metered.put(null, VALUE));
+    }
+
+    @Test
+    public void shouldThrowNullPointerOnPutIfAbsentIfKeyIsNull() {
+        setUpWithoutContext();
+        assertThrows(NullPointerException.class, () -> metered.putIfAbsent(null, VALUE));
+    }
+
+    @Test
+    public void shouldThrowNullPointerOnDeleteIfKeyIsNull() {
+        setUpWithoutContext();
+        assertThrows(NullPointerException.class, () -> metered.delete(null));
+    }
+
+    @Test
+    public void shouldThrowNullPointerOnPutAllIfAnyKeyIsNull() {
+        setUpWithoutContext();
+        assertThrows(NullPointerException.class, () -> metered.putAll(Collections.singletonList(KeyValue.pair(null, VALUE))));
+    }
+
+    @SuppressWarnings("resource")
+    @Test
+    public void shouldThrowNullPointerOnPrefixScanIfPrefixIsNull() {
+        setUpWithoutContext();
+        final StringSerializer stringSerializer = new StringSerializer();
+        assertThrows(NullPointerException.class, () -> metered.prefixScan(null, stringSerializer));
+    }
+
+    @SuppressWarnings("resource")
+    @Test
+    public void shouldThrowNullPointerOnRangeIfFromIsNull() {
+        setUpWithoutContext();
+        assertThrows(NullPointerException.class, () -> metered.range(null, "to"));
+    }
+
+    @SuppressWarnings("resource")
+    @Test
+    public void shouldThrowNullPointerOnRangeIfToIsNull() {
+        setUpWithoutContext();
+        assertThrows(NullPointerException.class, () -> metered.range("from", null));
+    }
+
+    @SuppressWarnings("resource")
+    @Test
+    public void shouldThrowNullPointerOnReverseRangeIfFromIsNull() {
+        setUpWithoutContext();
+        assertThrows(NullPointerException.class, () -> metered.reverseRange(null, "to"));
+    }
+
+    @SuppressWarnings("resource")
+    @Test
+    public void shouldThrowNullPointerOnReverseRangeIfToIsNull() {
+        setUpWithoutContext();
+        assertThrows(NullPointerException.class, () -> metered.reverseRange("from", null));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldGetRecordsWithPrefixKey() {
+        setUp();
+        final Serializer<String> mockSerializer = mock(Serializer.class);
+        final Headers headers = new RecordHeaders();
+        when(context.headers()).thenReturn(headers);
+        when(mockSerializer.serialize(null, headers, KEY)).thenReturn(KEY.getBytes(StandardCharsets.UTF_8));
+        
+        when(inner.prefixScan(eq(KEY.getBytes(StandardCharsets.UTF_8)), any(ByteArraySerializer.class)))
+            .thenReturn(new KeyValueIteratorStub<>(Collections.singletonList(BYTE_KEY_VALUE_PAIR).iterator()));
+        init();
+
+        final KeyValueIterator<String, String> iterator = metered.prefixScan(KEY, mockSerializer);
+        assertEquals(VALUE, iterator.next().value);
+        iterator.close();
+
+        final KafkaMetric metric = metrics.metric(new MetricName("prefix-scan-rate", STORE_LEVEL_GROUP, "", tags));
+        assertTrue((Double) metric.metricValue() > 0);
+        verify(mockSerializer).serialize(null, headers, KEY);
+    }
+
+    @Test
+    public void shouldTrackNumKeysMetric() {
+        setUp();
+        init();
+
+        final KafkaMetric numKeysMetric = metric("num-keys");
+        assertNotNull(numKeysMetric);
+        // inner store is a mock (not InMemoryKeyValueStore), so returns -1
+        assertEquals(-1L, (Long) numKeysMetric.metricValue());
+    }
+
+    @SuppressWarnings({"unused", "unchecked"})
+    @Test
+    public void shouldTrackOpenIteratorsMetric() {
+        setUp();
+        final Serializer<String> mockSerializer = mock(Serializer.class);
+        final Headers headers = new RecordHeaders();
+        when(context.headers()).thenReturn(headers);
+        when(mockSerializer.serialize(null, headers, KEY)).thenReturn(KEY.getBytes(StandardCharsets.UTF_8));
+        
+        when(inner.prefixScan(eq(KEY.getBytes(StandardCharsets.UTF_8)), any(ByteArraySerializer.class)))
+            .thenReturn(KeyValueIterators.emptyIterator());
+        init();
+
+        final KafkaMetric openIteratorsMetric = metric("num-open-iterators");
+        assertNotNull(openIteratorsMetric);
+
+        assertEquals(0L, (Long) openIteratorsMetric.metricValue());
+
+        try (final KeyValueIterator<String, String> unused = metered.prefixScan(KEY, mockSerializer)) {
+            assertEquals(1L, (Long) openIteratorsMetric.metricValue());
+        }
+
+        assertEquals(0L, (Long) openIteratorsMetric.metricValue());
+        verify(mockSerializer).serialize(null, headers, KEY);
+    }
+
+    @SuppressWarnings("unused")
+    @Test
+    public void shouldTimeIteratorDuration() {
+        setUp();
+        when(inner.all()).thenReturn(KeyValueIterators.emptyIterator());
+        init();
+
+        final KafkaMetric iteratorDurationAvgMetric = metric("iterator-duration-avg");
+        final KafkaMetric iteratorDurationMaxMetric = metric("iterator-duration-max");
+        assertNotNull(iteratorDurationAvgMetric);
+        assertNotNull(iteratorDurationMaxMetric);
+
+        assertEquals(Double.NaN, (Double) iteratorDurationAvgMetric.metricValue());
+        assertEquals(Double.NaN, (Double) iteratorDurationMaxMetric.metricValue());
+
+        try (final KeyValueIterator<String, String> unused = metered.all()) {
+            // nothing to do, just close immediately
+            mockTime.sleep(2);
+        }
+
+        assertEquals(2.0 * TimeUnit.MILLISECONDS.toNanos(1), (double) iteratorDurationAvgMetric.metricValue());
+        assertEquals(2.0 * TimeUnit.MILLISECONDS.toNanos(1), (double) iteratorDurationMaxMetric.metricValue());
+
+        try (final KeyValueIterator<String, String> iterator = metered.all()) {
+            // nothing to do, just close immediately
+            mockTime.sleep(3);
+        }
+
+        assertEquals(2.5 * TimeUnit.MILLISECONDS.toNanos(1), (double) iteratorDurationAvgMetric.metricValue());
+        assertEquals(3.0 * TimeUnit.MILLISECONDS.toNanos(1), (double) iteratorDurationMaxMetric.metricValue());
+    }
+
+    @SuppressWarnings("unused")
+    @Test
+    public void shouldTrackOldestOpenIteratorTimestamp() {
+        setUp();
+        when(inner.all()).thenReturn(KeyValueIterators.emptyIterator());
+        init();
+
+        final KafkaMetric oldestIteratorTimestampMetric = metric("oldest-iterator-open-since-ms");
+        assertNotNull(oldestIteratorTimestampMetric);
+
+        assertEquals(0L, oldestIteratorTimestampMetric.metricValue());
+
+        KeyValueIterator<String, String> second = null;
+        final long secondTimestamp;
+        try {
+            try (final KeyValueIterator<String, String> unused = metered.all()) {
+                final long oldestTimestamp = mockTime.milliseconds();
+                assertEquals(oldestTimestamp, (Long) oldestIteratorTimestampMetric.metricValue());
+                mockTime.sleep(100);
+
+                // open a second iterator before closing the first to test that we still produce the first iterator's timestamp
+                second = metered.all();
+                secondTimestamp = mockTime.milliseconds();
+                assertEquals(oldestTimestamp, (Long) oldestIteratorTimestampMetric.metricValue());
+                mockTime.sleep(100);
+            }
+
+            // now that the first iterator is closed, check that the timestamp has advanced to the still open second iterator
+            assertEquals(secondTimestamp, oldestIteratorTimestampMetric.metricValue());
+        } finally {
+            if (second != null) {
+                second.close();
+            }
+        }
+        // no open iterators left, timestamp should be reset to 0
+        assertEquals(0L, oldestIteratorTimestampMetric.metricValue());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldReadOnlyViewGetApplySerdesAndRecordGetMetric() {
+        setUp();
+        final ReadOnlyKeyValueStore<Bytes, byte[]> innerView = mock(ReadOnlyKeyValueStore.class);
+        when(inner.readOnly(IsolationLevel.READ_UNCOMMITTED)).thenReturn(innerView);
+        when(innerView.get(KEY_BYTES)).thenReturn(VALUE_BYTES);
+        init();
+
+        final ReadOnlyKeyValueStore<String, String> view = metered.readOnly(IsolationLevel.READ_UNCOMMITTED);
+        assertEquals(VALUE, view.get(KEY));
+
+        assertTrue((Double) metric("get-rate").metricValue() > 0);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldReadOnlyViewRangeApplySerdesAndRecordRangeMetric() {
+        setUp();
+        final ReadOnlyKeyValueStore<Bytes, byte[]> innerView = mock(ReadOnlyKeyValueStore.class);
+        when(inner.readOnly(IsolationLevel.READ_UNCOMMITTED)).thenReturn(innerView);
+        when(innerView.range(KEY_BYTES, KEY_BYTES))
+            .thenReturn(new KeyValueIteratorStub<>(Collections.singletonList(BYTE_KEY_VALUE_PAIR).iterator()));
+        init();
+
+        final ReadOnlyKeyValueStore<String, String> view = metered.readOnly(IsolationLevel.READ_UNCOMMITTED);
+        try (final KeyValueIterator<String, String> it = view.range(KEY, KEY)) {
+            assertEquals(VALUE, it.next().value);
+            assertFalse(it.hasNext());
+        }
+
+        assertTrue((Double) metric("range-rate").metricValue() > 0);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldReadOnlyViewReverseRangeApplySerdesAndRecordRangeMetric() {
+        setUp();
+        final ReadOnlyKeyValueStore<Bytes, byte[]> innerView = mock(ReadOnlyKeyValueStore.class);
+        when(inner.readOnly(IsolationLevel.READ_UNCOMMITTED)).thenReturn(innerView);
+        when(innerView.reverseRange(KEY_BYTES, KEY_BYTES))
+            .thenReturn(new KeyValueIteratorStub<>(Collections.singletonList(BYTE_KEY_VALUE_PAIR).iterator()));
+        init();
+
+        final ReadOnlyKeyValueStore<String, String> view = metered.readOnly(IsolationLevel.READ_UNCOMMITTED);
+        try (final KeyValueIterator<String, String> it = view.reverseRange(KEY, KEY)) {
+            assertEquals(VALUE, it.next().value);
+            assertFalse(it.hasNext());
+        }
+
+        assertTrue((Double) metric("range-rate").metricValue() > 0);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldReadOnlyViewAllApplySerdesAndRecordAllMetric() {
+        setUp();
+        final ReadOnlyKeyValueStore<Bytes, byte[]> innerView = mock(ReadOnlyKeyValueStore.class);
+        when(inner.readOnly(IsolationLevel.READ_UNCOMMITTED)).thenReturn(innerView);
+        when(innerView.all())
+            .thenReturn(new KeyValueIteratorStub<>(Collections.singletonList(BYTE_KEY_VALUE_PAIR).iterator()));
+        init();
+
+        final ReadOnlyKeyValueStore<String, String> view = metered.readOnly(IsolationLevel.READ_UNCOMMITTED);
+        try (final KeyValueIterator<String, String> it = view.all()) {
+            assertEquals(VALUE, it.next().value);
+            assertFalse(it.hasNext());
+        }
+
+        assertTrue((Double) metric(new MetricName("all-rate", STORE_LEVEL_GROUP, "", tags)).metricValue() > 0);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldReadOnlyViewReverseAllApplySerdesAndRecordAllMetric() {
+        setUp();
+        final ReadOnlyKeyValueStore<Bytes, byte[]> innerView = mock(ReadOnlyKeyValueStore.class);
+        when(inner.readOnly(IsolationLevel.READ_UNCOMMITTED)).thenReturn(innerView);
+        when(innerView.reverseAll())
+            .thenReturn(new KeyValueIteratorStub<>(Collections.singletonList(BYTE_KEY_VALUE_PAIR).iterator()));
+        init();
+
+        final ReadOnlyKeyValueStore<String, String> view = metered.readOnly(IsolationLevel.READ_UNCOMMITTED);
+        try (final KeyValueIterator<String, String> it = view.reverseAll()) {
+            assertEquals(VALUE, it.next().value);
+            assertFalse(it.hasNext());
+        }
+
+        assertTrue((Double) metric(new MetricName("all-rate", STORE_LEVEL_GROUP, "", tags)).metricValue() > 0);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldReadOnlyViewPrefixScanApplySerdesAndRecordPrefixScanMetric() {
+        setUp();
+        final ReadOnlyKeyValueStore<Bytes, byte[]> innerView = mock(ReadOnlyKeyValueStore.class);
+        final Serializer<String> mockSerializer = mock(Serializer.class);
+        final Headers headers = new RecordHeaders();
+        when(context.headers()).thenReturn(headers);
+        when(mockSerializer.serialize(null, headers, KEY)).thenReturn(KEY.getBytes(StandardCharsets.UTF_8));
+        
+        when(inner.readOnly(IsolationLevel.READ_UNCOMMITTED)).thenReturn(innerView);
+        when(innerView.prefixScan(eq(KEY.getBytes(StandardCharsets.UTF_8)), any(ByteArraySerializer.class)))
+            .thenReturn(new KeyValueIteratorStub<>(Collections.singletonList(BYTE_KEY_VALUE_PAIR).iterator()));
+        init();
+
+        final ReadOnlyKeyValueStore<String, String> view = metered.readOnly(IsolationLevel.READ_UNCOMMITTED);
+        try (final KeyValueIterator<String, String> it = view.prefixScan(KEY, mockSerializer)) {
+            assertEquals(VALUE, it.next().value);
+            assertFalse(it.hasNext());
+        }
+
+        final KafkaMetric metric = metric("prefix-scan-rate");
+        assertTrue((Double) metric.metricValue() > 0);
+        verify(mockSerializer).serialize(null, headers, KEY);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldReadOnlyViewApproximateNumEntriesDelegatesToUnderlying() {
+        setUp();
+        final ReadOnlyKeyValueStore<Bytes, byte[]> innerView = mock(ReadOnlyKeyValueStore.class);
+        when(inner.readOnly(IsolationLevel.READ_UNCOMMITTED)).thenReturn(innerView);
+        when(innerView.approximateNumEntries()).thenReturn(42L);
+        init();
+
+        final ReadOnlyKeyValueStore<String, String> view = metered.readOnly(IsolationLevel.READ_UNCOMMITTED);
+        assertEquals(42L, view.approximateNumEntries());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void shouldPassReadCommittedThroughToInner() {
+        setUp();
+        final ReadOnlyKeyValueStore<Bytes, byte[]> innerView = mock(ReadOnlyKeyValueStore.class);
+        when(inner.readOnly(IsolationLevel.READ_COMMITTED)).thenReturn(innerView);
+        init();
+
+        metered.readOnly(IsolationLevel.READ_COMMITTED);
+
+        verify(inner).readOnly(IsolationLevel.READ_COMMITTED);
+    }
+
+    @Test
+    public void shouldThrowNpeOnNullIsolationLevel() {
+        setUp();
+        init();
+
+        assertThrows(NullPointerException.class, () -> metered.readOnly(null));
+    }
+
+    private KafkaMetric metric(final MetricName metricName) {
+        return this.metrics.metric(metricName);
+    }
+
+    private KafkaMetric metric(final String name) {
+        return metrics.metric(new MetricName(name, STORE_LEVEL_GROUP, "", tags));
+    }
+
+    private List<MetricName> storeMetrics() {
+        return metrics.metrics()
+                      .keySet()
+                      .stream()
+                      .filter(name -> name.group().equals(STORE_LEVEL_GROUP) && name.tags().equals(tags))
+                      .collect(Collectors.toList());
+    }
+}

@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.common.metrics.stats;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.metrics.MetricConfig;
 
 /**
@@ -28,12 +29,13 @@ import org.apache.kafka.common.metrics.MetricConfig;
  * an artificially high rate when the gap between readings
  * is close to 0.
  */
+@InterfaceAudience.Public
 public class SimpleRate extends Rate {
 
     @Override
     public long windowSize(MetricConfig config, long now) {
         stat.purgeObsoleteSamples(config, now);
-        long elapsed = now - stat.oldest(now).lastWindowMs;
-        return elapsed < config.timeWindowMs() ? config.timeWindowMs() : elapsed;
+        long elapsed = now - stat.oldest(now).startTimeMs;
+        return Math.max(elapsed, config.timeWindowMs());
     }
 }

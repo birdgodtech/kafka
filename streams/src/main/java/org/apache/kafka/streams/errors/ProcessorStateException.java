@@ -14,17 +14,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.streams.errors;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 /**
- * Indicates a processor state operation (e.g. put, get) has failed.
+ * Indicates a processor state operation (e.g. init, put, get) has failed.
  *
  * @see org.apache.kafka.streams.processor.StateStore
  */
+@InterfaceAudience.Public
 public class ProcessorStateException extends StreamsException {
 
-    private final static long serialVersionUID = 1L;
+    private static final long serialVersionUID = 1L;
 
     public ProcessorStateException(final String message) {
         super(message);

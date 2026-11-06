@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.connect.connector;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.header.ConnectHeaders;
 import org.apache.kafka.connect.header.Header;
@@ -26,11 +27,12 @@ import java.util.Objects;
 /**
  * <p>
  * Base class for records containing data to be copied to/from Kafka. This corresponds closely to
- * Kafka's ProducerRecord and ConsumerRecord classes, and holds the data that may be used by both
- * sources and sinks (topic, kafkaPartition, key, value). Although both implementations include a
+ * Kafka's {@link org.apache.kafka.clients.producer.ProducerRecord ProducerRecord} and {@link org.apache.kafka.clients.consumer.ConsumerRecord ConsumerRecord} classes, and holds the data that may be used by both
+ * sources and sinks (topic, kafkaPartition, key, value, timestamp, headers). Although both implementations include a
  * notion of offset, it is not included here because they differ in type.
  * </p>
  */
+@InterfaceAudience.Public
 public abstract class ConnectRecord<R extends ConnectRecord<R>> {
     private final String topic;
     private final Integer kafkaPartition;
@@ -140,7 +142,9 @@ public abstract class ConnectRecord<R extends ConnectRecord<R>> {
                 "topic='" + topic + '\'' +
                 ", kafkaPartition=" + kafkaPartition +
                 ", key=" + key +
+                ", keySchema=" + keySchema +
                 ", value=" + value +
+                ", valueSchema=" + valueSchema +
                 ", timestamp=" + timestamp +
                 ", headers=" + headers +
                 '}';
@@ -153,26 +157,16 @@ public abstract class ConnectRecord<R extends ConnectRecord<R>> {
         if (o == null || getClass() != o.getClass())
             return false;
 
-        ConnectRecord that = (ConnectRecord) o;
+        ConnectRecord<?> that = (ConnectRecord<?>) o;
 
-        if (kafkaPartition != null ? !kafkaPartition.equals(that.kafkaPartition) : that.kafkaPartition != null)
-            return false;
-        if (topic != null ? !topic.equals(that.topic) : that.topic != null)
-            return false;
-        if (keySchema != null ? !keySchema.equals(that.keySchema) : that.keySchema != null)
-            return false;
-        if (key != null ? !key.equals(that.key) : that.key != null)
-            return false;
-        if (valueSchema != null ? !valueSchema.equals(that.valueSchema) : that.valueSchema != null)
-            return false;
-        if (value != null ? !value.equals(that.value) : that.value != null)
-            return false;
-        if (timestamp != null ? !timestamp.equals(that.timestamp) : that.timestamp != null)
-            return false;
-        if (!Objects.equals(headers, that.headers))
-            return false;
-
-        return true;
+        return Objects.equals(kafkaPartition, that.kafkaPartition)
+               && Objects.equals(topic, that.topic)
+               && Objects.equals(keySchema, that.keySchema)
+               && Objects.equals(key, that.key)
+               && Objects.equals(valueSchema, that.valueSchema)
+               && Objects.equals(value, that.value)
+               && Objects.equals(timestamp, that.timestamp)
+               && Objects.equals(headers, that.headers);
     }
 
     @Override

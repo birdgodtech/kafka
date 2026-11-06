@@ -17,78 +17,93 @@
 package org.apache.kafka.common.network;
 
 import org.apache.kafka.common.Configurable;
-import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.config.internals.BrokerSecurityConfigs;
+import org.apache.kafka.common.security.TestSecurityConfig;
 import org.apache.kafka.common.security.auth.AuthenticationContext;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.common.security.auth.KafkaPrincipalBuilder;
-import org.apache.kafka.common.security.auth.PlaintextAuthenticationContext;
-import org.apache.kafka.common.security.auth.PrincipalBuilder;
-import org.apache.kafka.common.security.auth.SecurityProtocol;
-import org.easymock.EasyMock;
-import org.junit.Test;
 
-import java.net.InetAddress;
-import java.security.Principal;
+import org.junit.jupiter.api.Test;
+
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Properties;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ChannelBuildersTest {
-
-    @Test
-    public void testCreateOldPrincipalBuilder() throws Exception {
-        TransportLayer transportLayer = EasyMock.mock(TransportLayer.class);
-        Authenticator authenticator = EasyMock.mock(Authenticator.class);
-
-        Map<String, Object> configs = new HashMap<>();
-        configs.put(BrokerSecurityConfigs.PRINCIPAL_BUILDER_CLASS_CONFIG, OldPrincipalBuilder.class);
-        KafkaPrincipalBuilder builder = ChannelBuilders.createPrincipalBuilder(configs, transportLayer, authenticator, null);
-
-        // test old principal builder is properly configured and delegated to
-        assertTrue(OldPrincipalBuilder.configured);
-
-        // test delegation
-        KafkaPrincipal principal = builder.build(new PlaintextAuthenticationContext(InetAddress.getLocalHost(), SecurityProtocol.PLAINTEXT.name()));
-        assertEquals(OldPrincipalBuilder.PRINCIPAL_NAME, principal.getName());
-        assertEquals(KafkaPrincipal.USER_TYPE, principal.getPrincipalType());
-    }
 
     @Test
     public void testCreateConfigurableKafkaPrincipalBuilder() {
         Map<String, Object> configs = new HashMap<>();
         configs.put(BrokerSecurityConfigs.PRINCIPAL_BUILDER_CLASS_CONFIG, ConfigurableKafkaPrincipalBuilder.class);
-        KafkaPrincipalBuilder builder = ChannelBuilders.createPrincipalBuilder(configs, null, null, null);
-        assertTrue(builder instanceof ConfigurableKafkaPrincipalBuilder);
+        KafkaPrincipalBuilder builder = ChannelBuilders.createPrincipalBuilder(configs, null, null);
+        assertInstanceOf(ConfigurableKafkaPrincipalBuilder.class, builder);
         assertTrue(((ConfigurableKafkaPrincipalBuilder) builder).configured);
     }
 
-    @SuppressWarnings("deprecation")
-    public static class OldPrincipalBuilder implements PrincipalBuilder {
-        private static boolean configured = false;
-        private static final String PRINCIPAL_NAME = "bob";
+    @Test
+    public void testChannelBuilderConfigs() {
+        Properties props = new Properties();
+        props.put("listener.name.listener1.gssapi.sasl.kerberos.service.name", "testkafka");
+        props.put("listener.name.listener1.sasl.kerberos.service.name", "testkafkaglobal");
+        props.put("plain.sasl.server.callback.handler.class", "callback");
+        props.put("listener.name.listener1.gssapi.config1.key", "custom.config1");
+        props.put("custom.config2.key", "custom.config2");
+        TestSecurityConfig securityConfig = new TestSecurityConfig(props);
 
-        @Override
-        public void configure(Map<String, ?> configs) {
-            configured = true;
-        }
+        // test configs with listener prefix
+        Map<String, Object> configs = ChannelBuilders.channelBuilderConfigs(securityConfig, new ListenerName("listener1"));
 
-        @Override
-        public Principal buildPrincipal(TransportLayer transportLayer, Authenticator authenticator) throws KafkaException {
-            return new Principal() {
-                @Override
-                public String getName() {
-                    return PRINCIPAL_NAME;
-                }
-            };
-        }
+        assertNull(configs.get("listener.name.listener1.gssapi.sasl.kerberos.service.name"));
+        assertFalse(securityConfig.unused().contains("listener.name.listener1.gssapi.sasl.kerberos.service.name"));
 
-        @Override
-        public void close() throws KafkaException {
+        assertEquals("testkafka", configs.get("gssapi.sasl.kerberos.service.name"));
+        assertFalse(securityConfig.unused().contains("gssapi.sasl.kerberos.service.name"));
 
-        }
+        assertEquals("testkafkaglobal", configs.get("sasl.kerberos.service.name"));
+        assertFalse(securityConfig.unused().contains("sasl.kerberos.service.name"));
+
+        assertNull(configs.get("listener.name.listener1.sasl.kerberos.service.name"));
+        assertFalse(securityConfig.unused().contains("listener.name.listener1.sasl.kerberos.service.name"));
+
+        assertNull(configs.get("plain.sasl.server.callback.handler.class"));
+        assertFalse(securityConfig.unused().contains("plain.sasl.server.callback.handler.class"));
+
+        assertEquals("custom.config1", configs.get("listener.name.listener1.gssapi.config1.key"));
+        assertFalse(securityConfig.unused().contains("listener.name.listener1.gssapi.config1.key"));
+
+        assertEquals("custom.config2", configs.get("custom.config2.key"));
+        assertFalse(securityConfig.unused().contains("custom.config2.key"));
+
+        // test configs without listener prefix
+        securityConfig = new TestSecurityConfig(props);
+        configs = ChannelBuilders.channelBuilderConfigs(securityConfig, null);
+
+        assertEquals("testkafka", configs.get("listener.name.listener1.gssapi.sasl.kerberos.service.name"));
+        assertFalse(securityConfig.unused().contains("listener.name.listener1.gssapi.sasl.kerberos.service.name"));
+
+        assertNull(configs.get("gssapi.sasl.kerberos.service.name"));
+        assertFalse(securityConfig.unused().contains("gssapi.sasl.kerberos.service.name"));
+
+        assertEquals("testkafkaglobal", configs.get("listener.name.listener1.sasl.kerberos.service.name"));
+        assertFalse(securityConfig.unused().contains("listener.name.listener1.sasl.kerberos.service.name"));
+
+        assertNull(configs.get("sasl.kerberos.service.name"));
+        assertFalse(securityConfig.unused().contains("sasl.kerberos.service.name"));
+
+        assertEquals("callback", configs.get("plain.sasl.server.callback.handler.class"));
+        assertFalse(securityConfig.unused().contains("plain.sasl.server.callback.handler.class"));
+
+        assertEquals("custom.config1", configs.get("listener.name.listener1.gssapi.config1.key"));
+        assertFalse(securityConfig.unused().contains("listener.name.listener1.gssapi.config1.key"));
+
+        assertEquals("custom.config2", configs.get("custom.config2.key"));
+        assertFalse(securityConfig.unused().contains("custom.config2.key"));
     }
 
     public static class ConfigurableKafkaPrincipalBuilder implements KafkaPrincipalBuilder, Configurable {
@@ -101,6 +116,16 @@ public class ChannelBuildersTest {
 
         @Override
         public KafkaPrincipal build(AuthenticationContext context) {
+            return null;
+        }
+
+        @Override
+        public byte[] serialize(KafkaPrincipal principal) {
+            return new byte[0];
+        }
+
+        @Override
+        public KafkaPrincipal deserialize(byte[] bytes) {
             return null;
         }
     }

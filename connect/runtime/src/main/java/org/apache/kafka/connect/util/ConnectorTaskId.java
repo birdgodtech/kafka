@@ -25,48 +25,23 @@ import java.io.Serializable;
  * Unique ID for a single task. It includes a unique connector ID and a task ID that is unique within
  * the connector.
  */
-public class ConnectorTaskId implements Serializable, Comparable<ConnectorTaskId> {
-    private final String connector;
-    private final int task;
-
+public record ConnectorTaskId(String connector, int task) implements Serializable, Comparable<ConnectorTaskId> {
     @JsonCreator
     public ConnectorTaskId(@JsonProperty("connector") String connector, @JsonProperty("task") int task) {
         this.connector = connector;
         this.task = task;
     }
 
+    @Override
     @JsonProperty
     public String connector() {
         return connector;
     }
 
+    @Override
     @JsonProperty
     public int task() {
         return task;
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (this == o)
-            return true;
-        if (o == null || getClass() != o.getClass())
-            return false;
-
-        ConnectorTaskId that = (ConnectorTaskId) o;
-
-        if (task != that.task)
-            return false;
-        if (connector != null ? !connector.equals(that.connector) : that.connector != null)
-            return false;
-
-        return true;
-    }
-
-    @Override
-    public int hashCode() {
-        int result = connector != null ? connector.hashCode() : 0;
-        result = 31 * result + task;
-        return result;
     }
 
     @Override

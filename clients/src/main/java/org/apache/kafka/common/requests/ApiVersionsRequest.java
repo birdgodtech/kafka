@@ -16,58 +16,78 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.message.ApiVersionsRequestData;
+import org.apache.kafka.common.message.ApiVersionsResponseData;
+import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersionCollection;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.Schema;
-import org.apache.kafka.common.protocol.types.Struct;
+import org.apache.kafka.common.protocol.Readable;
+import org.apache.kafka.common.utils.internals.AppInfoParser;
 
-import java.nio.ByteBuffer;
-import java.util.Collections;
+import java.util.regex.Pattern;
 
 public class ApiVersionsRequest extends AbstractRequest {
-    private static final Schema API_VERSIONS_REQUEST_V0 = new Schema();
-
-    /* v1 request is the same as v0. Throttle time has been added to response */
-    private static final Schema API_VERSIONS_REQUEST_V1 = API_VERSIONS_REQUEST_V0;
-
-    /**
-     * The version number is bumped to indicate that on quota violation brokers send out responses before throttling.
-     */
-    private static final Schema API_VERSIONS_REQUEST_V2 = API_VERSIONS_REQUEST_V1;
-
-    public static Schema[] schemaVersions() {
-        return new Schema[]{API_VERSIONS_REQUEST_V0, API_VERSIONS_REQUEST_V1, API_VERSIONS_REQUEST_V2};
-    }
 
     public static class Builder extends AbstractRequest.Builder<ApiVersionsRequest> {
+        private static final String DEFAULT_CLIENT_SOFTWARE_NAME = "apache-kafka-java";
+
+        private static final ApiVersionsRequestData DEFAULT_DATA = new ApiVersionsRequestData()
+            .setClientSoftwareName(DEFAULT_CLIENT_SOFTWARE_NAME)
+            .setClientSoftwareVersion(AppInfoParser.getVersion());
+
+        private final ApiVersionsRequestData data;
 
         public Builder() {
-            super(ApiKeys.API_VERSIONS);
+            this(DEFAULT_DATA,
+                ApiKeys.API_VERSIONS.oldestVersion(),
+                ApiKeys.API_VERSIONS.latestVersion());
         }
 
         public Builder(short version) {
-            super(ApiKeys.API_VERSIONS, version);
+            this(DEFAULT_DATA, version, version);
+        }
+
+        public Builder(
+            ApiVersionsRequestData data,
+            short oldestAllowedVersion,
+            short latestAllowedVersion
+        ) {
+            super(ApiKeys.API_VERSIONS, oldestAllowedVersion, latestAllowedVersion);
+            this.data = data.duplicate();
+        }
+
+        public void setClusterId(String clusterId) {
+            this.data.setClusterId(clusterId);
+        }
+
+        public void setNodeId(int nodeId) {
+            this.data.setNodeId(nodeId);
         }
 
         @Override
         public ApiVersionsRequest build(short version) {
-            return new ApiVersionsRequest(version);
+            return new ApiVersionsRequest(data, version);
         }
 
         @Override
         public String toString() {
-            return "(type=ApiVersionsRequest)";
+            return data.toString();
         }
     }
 
+    private static final Pattern SOFTWARE_NAME_VERSION_PATTERN = Pattern.compile("[a-zA-Z0-9](?:[a-zA-Z0-9\\-.]*[a-zA-Z0-9])?");
+
     private final Short unsupportedRequestVersion;
 
-    public ApiVersionsRequest(short version) {
-        this(version, null);
+    private final ApiVersionsRequestData data;
+
+    public ApiVersionsRequest(ApiVersionsRequestData data, short version) {
+        this(data, version, null);
     }
 
-    public ApiVersionsRequest(short version, Short unsupportedRequestVersion) {
-        super(version);
+    public ApiVersionsRequest(ApiVersionsRequestData data, short version, Short unsupportedRequestVersion) {
+        super(ApiKeys.API_VERSIONS, version);
+        this.data = data;
 
         // Unlike other request types, the broker handles ApiVersion requests with higher versions than
         // supported. It does so by treating the request as if it were v0 and returns a response using
@@ -77,36 +97,53 @@ public class ApiVersionsRequest extends AbstractRequest {
         this.unsupportedRequestVersion = unsupportedRequestVersion;
     }
 
-    public ApiVersionsRequest(Struct struct, short version) {
-        this(version, null);
-    }
-
     public boolean hasUnsupportedRequestVersion() {
         return unsupportedRequestVersion != null;
     }
 
+    public boolean isValid() {
+        if (version() >= 5) {
+            // Either cluster ID and node ID are both specified, or neither is.
+            if ((data.clusterId() == null && data.nodeId() != -1) || (data.clusterId() != null && data.nodeId() == -1)) {
+                return false;
+            }
+        }
+
+        if (version() >= 3) {
+            return SOFTWARE_NAME_VERSION_PATTERN.matcher(data.clientSoftwareName()).matches() &&
+                SOFTWARE_NAME_VERSION_PATTERN.matcher(data.clientSoftwareVersion()).matches();
+        } else {
+            return true;
+        }
+    }
+
     @Override
-    protected Struct toStruct() {
-        return new Struct(ApiKeys.API_VERSIONS.requestSchema(version()));
+    public ApiVersionsRequestData data() {
+        return data;
     }
 
     @Override
     public ApiVersionsResponse getErrorResponse(int throttleTimeMs, Throwable e) {
-        short version = version();
-        switch (version) {
-            case 0:
-                return new ApiVersionsResponse(Errors.forException(e), Collections.<ApiVersionsResponse.ApiVersion>emptyList());
-            case 1:
-            case 2:
-                return new ApiVersionsResponse(throttleTimeMs, Errors.forException(e), Collections.<ApiVersionsResponse.ApiVersion>emptyList());
-            default:
-                throw new IllegalArgumentException(String.format("Version %d is not valid. Valid versions for %s are 0 to %d",
-                        version, this.getClass().getSimpleName(), ApiKeys.API_VERSIONS.latestVersion()));
+        ApiVersionsResponseData data = new ApiVersionsResponseData()
+            .setErrorCode(Errors.forException(e).code());
+
+        if (version() >= 1) {
+            data.setThrottleTimeMs(throttleTimeMs);
         }
+
+        // Starting from Apache Kafka 2.4 (KIP-511), ApiKeys field is populated with the supported
+        // versions of the ApiVersionsRequest when an UNSUPPORTED_VERSION error is returned.
+        if (Errors.forException(e) == Errors.UNSUPPORTED_VERSION) {
+            ApiVersionCollection apiKeys = new ApiVersionCollection();
+            apiKeys.add(ApiVersionsResponse.toApiVersion(ApiKeys.API_VERSIONS));
+            data.setApiKeys(apiKeys);
+        }
+
+        return new ApiVersionsResponse(data);
     }
 
-    public static ApiVersionsRequest parse(ByteBuffer buffer, short version) {
-        return new ApiVersionsRequest(ApiKeys.API_VERSIONS.parseRequest(version, buffer), version);
+    public static ApiVersionsRequest parse(Readable readable, short version) {
+        return new ApiVersionsRequest(new ApiVersionsRequestData(readable, version), version);
     }
 
 }

@@ -16,6 +16,18 @@
  */
 package org.apache.kafka.clients.consumer;
 
+import java.util.Locale;
+
+/**
+ * @deprecated since 4.0; will be removed in a future release.
+ * Not required by Kafka client users; no replacement is provided.
+ */
+@Deprecated
 public enum OffsetResetStrategy {
-    LATEST, EARLIEST, NONE
+    LATEST, EARLIEST, NONE;
+
+    @Override
+    public String toString() {
+        return super.toString().toLowerCase(Locale.ROOT);
+    }
 }

@@ -16,9 +16,9 @@
  */
 package org.apache.kafka.common.resource;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class ResourceTypeTest {
     private static class AclResourceTypeTestInfo {
@@ -42,40 +42,41 @@ public class ResourceTypeTest {
         new AclResourceTypeTestInfo(ResourceType.GROUP, 3, "group", false),
         new AclResourceTypeTestInfo(ResourceType.CLUSTER, 4, "cluster", false),
         new AclResourceTypeTestInfo(ResourceType.TRANSACTIONAL_ID, 5, "transactional_id", false),
-        new AclResourceTypeTestInfo(ResourceType.DELEGATION_TOKEN, 6, "delegation_token", false)
+        new AclResourceTypeTestInfo(ResourceType.DELEGATION_TOKEN, 6, "delegation_token", false),
+        new AclResourceTypeTestInfo(ResourceType.USER, 7, "user", false)
     };
 
     @Test
-    public void testIsUnknown() throws Exception {
+    public void testIsUnknown() {
         for (AclResourceTypeTestInfo info : INFOS) {
-            assertEquals(info.resourceType + " was supposed to have unknown == " + info.unknown,
-                info.unknown, info.resourceType.isUnknown());
+            assertEquals(info.unknown, info.resourceType.isUnknown(),
+                info.resourceType + " was supposed to have unknown == " + info.unknown);
         }
     }
 
     @Test
-    public void testCode() throws Exception {
+    public void testCode() {
         assertEquals(ResourceType.values().length, INFOS.length);
         for (AclResourceTypeTestInfo info : INFOS) {
-            assertEquals(info.resourceType + " was supposed to have code == " + info.code,
-                info.code, info.resourceType.code());
-            assertEquals("AclResourceType.fromCode(" + info.code + ") was supposed to be " +
-                info.resourceType, info.resourceType, ResourceType.fromCode((byte) info.code));
+            assertEquals(info.code, info.resourceType.code(),
+                info.resourceType + " was supposed to have code == " + info.code);
+            assertEquals(info.resourceType, ResourceType.fromCode((byte) info.code), "AclResourceType.fromCode(" + info.code + ") was supposed to be " +
+                info.resourceType);
         }
         assertEquals(ResourceType.UNKNOWN, ResourceType.fromCode((byte) 120));
     }
 
     @Test
-    public void testName() throws Exception {
+    public void testName() {
         for (AclResourceTypeTestInfo info : INFOS) {
-            assertEquals("ResourceType.fromString(" + info.name + ") was supposed to be " +
-                info.resourceType, info.resourceType, ResourceType.fromString(info.name));
+            assertEquals(info.resourceType, ResourceType.fromString(info.name), "ResourceType.fromString(" + info.name + ") was supposed to be " +
+                info.resourceType);
         }
         assertEquals(ResourceType.UNKNOWN, ResourceType.fromString("something"));
     }
 
     @Test
-    public void testExhaustive() throws Exception {
+    public void testExhaustive() {
         assertEquals(INFOS.length, ResourceType.values().length);
         for (int i = 0; i < INFOS.length; i++) {
             assertEquals(INFOS[i].resourceType, ResourceType.values()[i]);

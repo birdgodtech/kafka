@@ -16,13 +16,14 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class RequestFutureTest {
 
@@ -52,52 +53,52 @@ public class RequestFutureTest {
         assertNull(future.value());
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void testRuntimeExceptionInComplete() {
         RequestFuture<Exception> future = new RequestFuture<>();
-        future.complete(new RuntimeException());
+        assertThrows(IllegalArgumentException.class, () -> future.complete(new RuntimeException()));
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void invokeCompleteAfterAlreadyComplete() {
         RequestFuture<Void> future = new RequestFuture<>();
         future.complete(null);
-        future.complete(null);
+        assertThrows(IllegalStateException.class, () -> future.complete(null));
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void invokeCompleteAfterAlreadyFailed() {
         RequestFuture<Void> future = new RequestFuture<>();
         future.raise(new RuntimeException());
-        future.complete(null);
+        assertThrows(IllegalStateException.class, () -> future.complete(null));
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void invokeRaiseAfterAlreadyFailed() {
         RequestFuture<Void> future = new RequestFuture<>();
         future.raise(new RuntimeException());
-        future.raise(new RuntimeException());
+        assertThrows(IllegalStateException.class, () -> future.raise(new RuntimeException()));
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void invokeRaiseAfterAlreadyCompleted() {
         RequestFuture<Void> future = new RequestFuture<>();
         future.complete(null);
-        future.raise(new RuntimeException());
+        assertThrows(IllegalStateException.class, () -> future.raise(new RuntimeException()));
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void invokeExceptionAfterSuccess() {
         RequestFuture<Void> future = new RequestFuture<>();
         future.complete(null);
-        future.exception();
+        assertThrows(IllegalStateException.class, future::exception);
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void invokeValueAfterFailure() {
         RequestFuture<Void> future = new RequestFuture<>();
         future.raise(new RuntimeException());
-        future.value();
+        assertThrows(IllegalStateException.class, future::value);
     }
 
     @Test
@@ -181,7 +182,7 @@ public class RequestFutureTest {
     @Test
     public void testComposeSuccessCase() {
         RequestFuture<String> future = new RequestFuture<>();
-        RequestFuture<Integer> composed = future.compose(new RequestFutureAdapter<String, Integer>() {
+        RequestFuture<Integer> composed = future.compose(new RequestFutureAdapter<>() {
             @Override
             public void onSuccess(String value, RequestFuture<Integer> future) {
                 future.complete(value.length());
@@ -198,7 +199,7 @@ public class RequestFutureTest {
     @Test
     public void testComposeFailureCase() {
         RequestFuture<String> future = new RequestFuture<>();
-        RequestFuture<Integer> composed = future.compose(new RequestFutureAdapter<String, Integer>() {
+        RequestFuture<Integer> composed = future.compose(new RequestFutureAdapter<>() {
             @Override
             public void onSuccess(String value, RequestFuture<Integer> future) {
                 future.complete(value.length());

@@ -17,11 +17,14 @@
 package org.apache.kafka.streams.processor;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.record.TimestampType;
-import org.junit.Test;
 
-import static org.hamcrest.CoreMatchers.is;
-import static org.hamcrest.MatcherAssert.assertThat;
+import org.junit.jupiter.api.Test;
+
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class LogAndSkipOnInvalidTimestampTest extends TimestampExtractorTest {
 
@@ -44,13 +47,14 @@ public class LogAndSkipOnInvalidTimestampTest extends TimestampExtractorTest {
                 TimestampType.NO_TIMESTAMP_TYPE,
                 0,
                 0,
-                0,
                 null,
-                null),
+                null,
+                new RecordHeaders(),
+                Optional.empty()),
             0
         );
 
-        assertThat(timestamp, is(invalidMetadataTimestamp));
+        assertEquals(invalidMetadataTimestamp, timestamp);
     }
 
 }

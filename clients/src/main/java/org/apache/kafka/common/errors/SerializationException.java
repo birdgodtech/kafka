@@ -14,13 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.errors;
 
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 /**
- *  Any exception during serialization in the producer
+ * Any exception during serialization or deserialization.
  */
+@InterfaceAudience.Public
 public class SerializationException extends KafkaException {
 
     private static final long serialVersionUID = 1L;
@@ -39,12 +42,6 @@ public class SerializationException extends KafkaException {
 
     public SerializationException() {
         super();
-    }
-
-    /* avoid the expensive and useless stack trace for serialization exceptions */
-    @Override
-    public Throwable fillInStackTrace() {
-        return this;
     }
 
 }

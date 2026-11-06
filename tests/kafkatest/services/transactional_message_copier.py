@@ -22,6 +22,9 @@ from ducktape.services.background_thread import BackgroundThreadService
 from kafkatest.directory_layout.kafka_path import KafkaPathResolverMixin
 from ducktape.cluster.remoteaccount import RemoteCommandError
 
+from kafkatest.services.kafka.util import get_log4j_config_param, get_log4j_config_for_tools
+
+
 class TransactionalMessageCopier(KafkaPathResolverMixin, BackgroundThreadService):
     """This service wraps org.apache.kafka.tools.TransactionalMessageCopier for
     use in system testing.
@@ -31,7 +34,6 @@ class TransactionalMessageCopier(KafkaPathResolverMixin, BackgroundThreadService
     STDERR_CAPTURE = os.path.join(PERSISTENT_ROOT, "transactional_message_copier.stderr")
     LOG_DIR = os.path.join(PERSISTENT_ROOT, "logs")
     LOG_FILE = os.path.join(LOG_DIR, "transactional_message_copier.log")
-    LOG4J_CONFIG = os.path.join(PERSISTENT_ROOT, "tools-log4j.properties")
 
     logs = {
         "transactional_message_copier_stdout": {
@@ -46,13 +48,15 @@ class TransactionalMessageCopier(KafkaPathResolverMixin, BackgroundThreadService
     }
 
     def __init__(self, context, num_nodes, kafka, transactional_id, consumer_group,
-                 input_topic, input_partition, output_topic, max_messages = -1,
-                 transaction_size = 1000, enable_random_aborts=True):
+                 input_topic, input_partition, output_topic, max_messages=-1,
+                 transaction_size=1000, transaction_timeout=None, enable_random_aborts=True,
+                 use_group_metadata=False, group_mode=False):
         super(TransactionalMessageCopier, self).__init__(context, num_nodes)
         self.kafka = kafka
         self.transactional_id = transactional_id
         self.consumer_group = consumer_group
         self.transaction_size = transaction_size
+        self.transaction_timeout = transaction_timeout
         self.input_topic = input_topic
         self.input_partition = input_partition
         self.output_topic = output_topic
@@ -62,17 +66,20 @@ class TransactionalMessageCopier(KafkaPathResolverMixin, BackgroundThreadService
         self.remaining = -1
         self.stop_timeout_sec = 60
         self.enable_random_aborts = enable_random_aborts
+        self.use_group_metadata = use_group_metadata
+        self.group_mode = group_mode
         self.loggers = {
-            "org.apache.kafka.clients.producer.internals": "TRACE"
+            "org.apache.kafka.clients.producer": "TRACE",
+            "org.apache.kafka.clients.consumer": "TRACE"
         }
 
     def _worker(self, idx, node):
         node.account.ssh("mkdir -p %s" % TransactionalMessageCopier.PERSISTENT_ROOT,
                          allow_fail=False)
         # Create and upload log properties
-        log_config = self.render('tools_log4j.properties',
+        log_config = self.render(get_log4j_config_for_tools(node),
                                  log_file=TransactionalMessageCopier.LOG_FILE)
-        node.account.create_file(TransactionalMessageCopier.LOG4J_CONFIG, log_config)
+        node.account.create_file(get_log4j_config_for_tools(node), log_config)
         # Configure security
         self.security_config = self.kafka.security_config.client_config(node=node)
         self.security_config.setup_node(node)
@@ -88,7 +95,7 @@ class TransactionalMessageCopier(KafkaPathResolverMixin, BackgroundThreadService
                         self.consumed = int(data["consumed"])
                         self.logger.info("%s: consumed %d, remaining %d" %
                                          (self.transactional_id, self.consumed, self.remaining))
-                        if "shutdown_complete" in data:
+                        if data["stage"] == "ShutdownComplete":
                            if self.remaining == 0:
                                 # We are only finished if the remaining
                                 # messages at the time of shutdown is 0.
@@ -109,7 +116,7 @@ class TransactionalMessageCopier(KafkaPathResolverMixin, BackgroundThreadService
     def start_cmd(self, node, idx):
         cmd  = "export LOG_DIR=%s;" % TransactionalMessageCopier.LOG_DIR
         cmd += " export KAFKA_OPTS=%s;" % self.security_config.kafka_opts
-        cmd += " export KAFKA_LOG4J_OPTS=\"-Dlog4j.configuration=file:%s\"; " % TransactionalMessageCopier.LOG4J_CONFIG
+        cmd += " export KAFKA_LOG4J_OPTS=\"%s%s\"; " % (get_log4j_config_param(node), get_log4j_config_for_tools(node))
         cmd += self.path.script("kafka-run-class.sh", node) + " org.apache.kafka.tools." + "TransactionalMessageCopier"
         cmd += " --broker-list %s" % self.kafka.bootstrap_servers(self.security_config.security_protocol)
         cmd += " --transactional-id %s" % self.transactional_id
@@ -119,8 +126,17 @@ class TransactionalMessageCopier(KafkaPathResolverMixin, BackgroundThreadService
         cmd += " --input-partition %s" % str(self.input_partition)
         cmd += " --transaction-size %s" % str(self.transaction_size)
 
+        if self.transaction_timeout is not None:
+            cmd += " --transaction-timeout %s" % str(self.transaction_timeout)
+
         if self.enable_random_aborts:
             cmd += " --enable-random-aborts"
+
+        if self.use_group_metadata:
+            cmd += " --use-group-metadata"
+
+        if self.group_mode:
+            cmd += " --group-mode"
 
         if self.max_messages > 0:
             cmd += " --max-messages %s" % str(self.max_messages)
@@ -135,7 +151,7 @@ class TransactionalMessageCopier(KafkaPathResolverMixin, BackgroundThreadService
 
     def pids(self, node):
         try:
-            cmd = "ps ax | grep -i TransactionalMessageCopier | grep java | grep -v grep | awk '{print $1}'"
+            cmd = "jps | grep -i TransactionalMessageCopier | awk '{print $1}'"
             pid_arr = [pid for pid in node.account.ssh_capture(cmd, allow_fail=True, callback=int)]
             return pid_arr
         except (RemoteCommandError, ValueError) as e:
@@ -145,12 +161,16 @@ class TransactionalMessageCopier(KafkaPathResolverMixin, BackgroundThreadService
     def alive(self, node):
         return len(self.pids(node)) > 0
 
+    def start_node(self, node):
+        BackgroundThreadService.start_node(self, node)
+        wait_until(lambda: self.alive(node), timeout_sec=60, err_msg="Node %s: Message Copier failed to start" % str(node.account))
+
     def kill_node(self, node, clean_shutdown=True):
         pids = self.pids(node)
         sig = signal.SIGTERM if clean_shutdown else signal.SIGKILL
         for pid in pids:
             node.account.signal(pid, sig)
-            wait_until(lambda: len(self.pids(node)) == 0, timeout_sec=60, err_msg="Message Copier failed to stop")
+        wait_until(lambda: not self.pids(node), timeout_sec=60, err_msg="Node %s: Message Copier failed to stop" % str(node.account))
 
     def stop_node(self, node, clean_shutdown=True):
         self.kill_node(node, clean_shutdown)

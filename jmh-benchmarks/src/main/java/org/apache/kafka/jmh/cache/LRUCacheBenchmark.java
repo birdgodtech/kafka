@@ -17,8 +17,8 @@
 
 package org.apache.kafka.jmh.cache;
 
-import java.util.concurrent.TimeUnit;
 import org.apache.kafka.common.cache.LRUCache;
+
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
@@ -29,6 +29,8 @@ import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
 import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
+
+import java.util.concurrent.TimeUnit;
 
 /**
  * This is a simple example of a JMH benchmark.
@@ -52,7 +54,7 @@ public class LRUCacheBenchmark {
 
     private LRUCache<String, String> lruCache;
 
-    int counter;
+    private long counter = 0;
 
     @Setup(Level.Trial)
     public void setUp() {
@@ -66,7 +68,7 @@ public class LRUCacheBenchmark {
     @Benchmark
     public String testCachePerformance() {
         counter++;
-        int index = counter % DISTINCT_KEYS;
+        int index = (int) (counter % DISTINCT_KEYS);
         String hashkey = keys[index];
         lruCache.put(hashkey, values[index]);
         return lruCache.get(hashkey);

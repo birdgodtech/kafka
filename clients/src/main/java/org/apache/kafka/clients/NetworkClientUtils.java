@@ -18,6 +18,8 @@
 package org.apache.kafka.clients;
 
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.errors.AuthenticationException;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.utils.Time;
 
 import java.io.IOException;
@@ -59,17 +61,27 @@ public final class NetworkClientUtils {
             throw new IllegalArgumentException("Timeout needs to be greater than 0");
         }
         long startTime = time.milliseconds();
-        long expiryTime = startTime + timeoutMs;
 
         if (isReady(client, node, startTime) ||  client.ready(node, startTime))
             return true;
 
         long attemptStartTime = time.milliseconds();
-        while (!client.isReady(node, attemptStartTime) && attemptStartTime < expiryTime) {
+        while (!client.isReady(node, attemptStartTime) && attemptStartTime - startTime < timeoutMs) {
             if (client.connectionFailed(node)) {
                 throw new IOException("Connection to " + node + " failed.");
             }
-            long pollTimeout = expiryTime - attemptStartTime;
+            long pollTimeout = timeoutMs - (attemptStartTime - startTime); // initialize in this order to avoid overflow
+
+            // If the network client is waiting to send data for some reason (eg. throttling or retry backoff),
+            // polling longer than that is potentially dangerous as the producer will not attempt to send
+            // any pending requests.
+            long waitingTime = client.pollDelayMs(node, startTime);
+            if (waitingTime > 0 && pollTimeout > waitingTime) {
+                // Block only until the next-scheduled time that it's okay to send data to the producer,
+                // wake up, and try again. This is the way.
+                pollTimeout = waitingTime;
+            }
+
             client.poll(pollTimeout, attemptStartTime);
             if (client.authenticationException(node) != null)
                 throw client.authenticationException(node);
@@ -83,25 +95,60 @@ public final class NetworkClientUtils {
      * disconnection happens (which can happen for a number of reasons including a request timeout).
      *
      * In case of a disconnection, an `IOException` is thrown.
+     * If shutdown is initiated on the client during this method, an IOException is thrown.
      *
      * This method is useful for implementing blocking behaviour on top of the non-blocking `NetworkClient`, use it with
      * care.
      */
     public static ClientResponse sendAndReceive(KafkaClient client, ClientRequest request, Time time) throws IOException {
-        client.send(request, time.milliseconds());
-        while (true) {
-            List<ClientResponse> responses = client.poll(Long.MAX_VALUE, time.milliseconds());
-            for (ClientResponse response : responses) {
-                if (response.requestHeader().correlationId() == request.correlationId()) {
-                    if (response.wasDisconnected()) {
-                        throw new IOException("Connection to " + response.destination() + " was disconnected before the response was read");
+        try {
+            client.send(request, time.milliseconds());
+            while (client.active()) {
+                List<ClientResponse> responses = client.poll(Long.MAX_VALUE, time.milliseconds());
+                for (ClientResponse response : responses) {
+                    if (response.requestHeader().correlationId() == request.correlationId()) {
+                        if (response.wasDisconnected()) {
+                            throw new IOException("Connection to " + response.destination() + " was disconnected before the response was read");
+                        }
+                        if (response.versionMismatch() != null) {
+                            throw response.versionMismatch();
+                        }
+                        return response;
                     }
-                    if (response.versionMismatch() != null) {
-                        throw response.versionMismatch();
-                    }
-                    return response;
                 }
             }
+            throw new IOException("Client was shutdown before response was read");
+        } catch (DisconnectException e) {
+            if (client.active())
+                throw e;
+            else
+                throw new IOException("Client was shutdown before response was read");
+
         }
+    }
+
+    /**
+     * Check if the code is disconnected and unavailable for immediate reconnection (i.e. if it is in
+     * reconnect backoff window following the disconnect).
+     */
+    public static boolean isUnavailable(KafkaClient client, Node node, Time time) {
+        return client.connectionFailed(node) && client.connectionDelay(node, time.milliseconds()) > 0;
+    }
+
+    /**
+     * Check for an authentication error on a given node and raise the exception if there is one.
+     */
+    public static void maybeThrowAuthFailure(KafkaClient client, Node node) {
+        AuthenticationException exception = client.authenticationException(node);
+        if (exception != null)
+            throw exception;
+    }
+
+    /**
+     * Initiate a connection if currently possible. This is only really useful for resetting the
+     * failed status of a socket.
+     */
+    public static void tryConnect(KafkaClient client, Node node, Time time) {
+        client.ready(node, time.milliseconds());
     }
 }

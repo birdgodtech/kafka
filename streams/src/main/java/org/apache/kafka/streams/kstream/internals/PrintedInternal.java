@@ -16,21 +16,19 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
-import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Printed;
-import org.apache.kafka.streams.processor.ProcessorSupplier;
+import org.apache.kafka.streams.processor.api.ProcessorSupplier;
 
 public class PrintedInternal<K, V> extends Printed<K, V> {
     public PrintedInternal(final Printed<K, V> printed) {
         super(printed);
     }
 
-    /**
-     * Builds the {@link ProcessorSupplier} that will be used to print the records flowing through a {@link KStream}.
-     *
-     * @return the {@code ProcessorSupplier} to be used for printing
-     */
-    public ProcessorSupplier<K, V> build(final String processorName) {
+    public ProcessorSupplier<K, V, Void, Void> build(final String processorName) {
         return new KStreamPrint<>(new PrintForeachAction<>(outputStream, mapper, label != null ? label : processorName));
+    }
+
+    public String name() {
+        return processorName;
     }
 }

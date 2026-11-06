@@ -17,49 +17,55 @@
 package org.apache.kafka.test;
 
 import org.apache.kafka.streams.processor.PunctuationType;
+import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.processor.internals.InternalProcessorContext;
 import org.apache.kafka.streams.processor.internals.ProcessorNode;
 
+import java.time.Instant;
 import java.util.Collections;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class MockProcessorNode<K, V> extends ProcessorNode<K, V> {
+public class MockProcessorNode<KIn, VIn, KOut, VOut> extends ProcessorNode<KIn, VIn, KOut, VOut> {
 
     private static final String NAME = "MOCK-PROCESS-";
     private static final AtomicInteger INDEX = new AtomicInteger(1);
 
-    public final MockProcessor<K, V> mockProcessor;
+    public final MockProcessor<KIn, VIn, KOut, VOut> mockProcessor;
 
     public boolean closed;
     public boolean initialized;
 
-    public MockProcessorNode(long scheduleInterval) {
+    public MockProcessorNode(final long scheduleInterval) {
         this(scheduleInterval, PunctuationType.STREAM_TIME);
     }
 
-    public MockProcessorNode(long scheduleInterval, PunctuationType punctuationType) {
-        this(new MockProcessor<K, V>(punctuationType, scheduleInterval));
+    public MockProcessorNode(final long scheduleInterval, final PunctuationType punctuationType) {
+        this(new MockProcessor<>(punctuationType, scheduleInterval));
+    }
+
+    public MockProcessorNode(final Instant startTime, final long scheduleInterval, final PunctuationType punctuationType) {
+        this(new MockProcessor<>(punctuationType, startTime, scheduleInterval));
     }
 
     public MockProcessorNode() {
-        this(new MockProcessor<K, V>());
+        this(new MockProcessor<>());
     }
 
-    private MockProcessorNode(final MockProcessor<K, V> mockProcessor) {
-        super(NAME + INDEX.getAndIncrement(), mockProcessor, Collections.<String>emptySet());
+    private MockProcessorNode(final MockProcessor<KIn, VIn, KOut, VOut> mockProcessor) {
+        super(NAME + INDEX.getAndIncrement(), mockProcessor, Collections.emptySet());
 
         this.mockProcessor = mockProcessor;
     }
 
     @Override
-    public void init(final InternalProcessorContext context) {
+    public void init(final InternalProcessorContext<KOut, VOut> context) {
         super.init(context);
         initialized = true;
     }
 
     @Override
-    public void process(K key, V value) {
-        processor().process(key, value);
+    public void process(final Record<KIn, VIn> record) {
+        mockProcessor.process(record);
     }
 
     @Override

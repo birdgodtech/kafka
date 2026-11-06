@@ -17,52 +17,51 @@
 package org.apache.kafka.clients.producer.internals;
 
 
+import org.apache.kafka.common.errors.InterruptException;
+import org.apache.kafka.common.errors.TimeoutException;
+
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 public final class TransactionalRequestResult {
-    static final TransactionalRequestResult COMPLETE = new TransactionalRequestResult(new CountDownLatch(0));
-
     private final CountDownLatch latch;
     private volatile RuntimeException error = null;
+    private final String operation;
+    private volatile boolean isAcked = false;
 
-    public TransactionalRequestResult() {
-        this(new CountDownLatch(1));
+    public TransactionalRequestResult(String operation) {
+        this(new CountDownLatch(1), operation);
     }
 
-    private TransactionalRequestResult(CountDownLatch latch) {
+    private TransactionalRequestResult(CountDownLatch latch, String operation) {
         this.latch = latch;
+        this.operation = operation;
     }
 
-    public void setError(RuntimeException error) {
+    public void fail(RuntimeException error) {
         this.error = error;
+        this.latch.countDown();
     }
 
     public void done() {
         this.latch.countDown();
     }
 
-    public void await() {
-        boolean completed = false;
-
-        while (!completed) {
-            try {
-                latch.await();
-                completed = true;
-            } catch (InterruptedException e) {
-                // Keep waiting until done, we have no other option for these transactional requests.
+    public void await(long timeout, TimeUnit unit, String expectedTimeoutReason) {
+        try {
+            boolean success = latch.await(timeout, unit);
+            if (!success) {
+                throw new TimeoutException("Timeout expired after " + unit.toMillis(timeout) +
+                    "ms while awaiting " + operation + ". " + expectedTimeoutReason);
             }
+
+            isAcked = true;
+            if (error != null) {
+                throw error;
+            }
+        } catch (InterruptedException e) {
+            throw new InterruptException("Received interrupt while awaiting " + operation, e);
         }
-
-        if (!isSuccessful())
-            throw error();
-    }
-
-    public boolean await(long timeout, TimeUnit unit) throws InterruptedException {
-        boolean success = latch.await(timeout, unit);
-        if (!isSuccessful())
-            throw error();
-        return success;
     }
 
     public RuntimeException error() {
@@ -70,11 +69,15 @@ public final class TransactionalRequestResult {
     }
 
     public boolean isSuccessful() {
-        return error == null;
+        return isCompleted() && error == null;
     }
 
     public boolean isCompleted() {
         return latch.getCount() == 0L;
+    }
+
+    public boolean isAcked() {
+        return isAcked;
     }
 
 }

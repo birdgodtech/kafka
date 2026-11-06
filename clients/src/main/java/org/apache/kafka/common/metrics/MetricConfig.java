@@ -14,7 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.metrics;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -23,7 +26,10 @@ import java.util.concurrent.TimeUnit;
 /**
  * Configuration values for metrics
  */
+@InterfaceAudience.Public
 public class MetricConfig {
+
+    public static final int DEFAULT_NUM_SAMPLES = 2;
 
     private Quota quota;
     private int samples;
@@ -33,9 +39,8 @@ public class MetricConfig {
     private Sensor.RecordingLevel recordingLevel;
 
     public MetricConfig() {
-        super();
         this.quota = null;
-        this.samples = 2;
+        this.samples = DEFAULT_NUM_SAMPLES;
         this.eventWindow = Long.MAX_VALUE;
         this.timeWindowMs = TimeUnit.MILLISECONDS.convert(30, TimeUnit.SECONDS);
         this.tags = new LinkedHashMap<>();

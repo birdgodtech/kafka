@@ -16,16 +16,15 @@
  */
 package org.apache.kafka.common.serialization;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.errors.SerializationException;
+import org.apache.kafka.common.header.Headers;
 
-import java.util.Map;
+import java.nio.ByteBuffer;
 
+@InterfaceAudience.Public
 public class LongDeserializer implements Deserializer<Long> {
-
-    public void configure(Map<String, ?> configs, boolean isKey) {
-        // nothing to do
-    }
-
+    @Override
     public Long deserialize(String topic, byte[] data) {
         if (data == null)
             return null;
@@ -41,7 +40,15 @@ public class LongDeserializer implements Deserializer<Long> {
         return value;
     }
 
-    public void close() {
-        // nothing to do
+    @Override
+    public Long deserialize(String topic, Headers headers, ByteBuffer data) {
+        if (data == null) {
+            return null;
+        }
+
+        if (data.remaining() != 8) {
+            throw new SerializationException("Size of data received by LongDeserializer is not 8");
+        }
+        return data.getLong(data.position());
     }
 }

@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.connect.data;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.connect.errors.DataException;
 
 import java.math.BigDecimal;
@@ -37,6 +38,7 @@ import java.math.BigInteger;
  *     The underlying representation of this type is bytes containing a two's complement integer
  * </p>
  */
+@InterfaceAudience.Public
 public class Decimal {
     public static final String LOGICAL_NAME = "org.apache.kafka.connect.data.Decimal";
     public static final String SCALE_FIELD = "scale";
@@ -59,16 +61,27 @@ public class Decimal {
     }
 
     /**
-     * Convert a value from its logical format (BigDecimal) to it's encoded format.
+     * Convert a value from its logical format ({@link BigDecimal}) to its encoded format (byte[]).
      * @param value the logical value
      * @return the encoded value
      */
     public static byte[] fromLogical(Schema schema, BigDecimal value) {
-        if (value.scale() != scale(schema))
-            throw new DataException("BigDecimal has mismatching scale value for given Decimal schema");
+        int schemaScale = scale(schema);
+        if (value.scale() != schemaScale)
+            throw new DataException(String.format(
+                "Decimal value has mismatching scale for given Decimal schema. "
+                    + "Schema has scale %d, value has scale %d.",
+                schemaScale,
+                value.scale()
+            ));
         return value.unscaledValue().toByteArray();
     }
 
+    /**
+     * Convert a value from its encoded format (byte[]) to its logical format ({@link BigDecimal}).
+     * @param value the encoded value
+     * @return the logical value
+     */
     public static BigDecimal toLogical(Schema schema, byte[] value) {
         return new BigDecimal(new BigInteger(value), scale(schema));
     }

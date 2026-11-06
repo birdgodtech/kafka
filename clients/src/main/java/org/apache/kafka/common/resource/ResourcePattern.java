@@ -17,17 +17,15 @@
 
 package org.apache.kafka.common.resource;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Objects;
 
 /**
  * Represents a pattern that is used by ACLs to match zero or more
  * {@link org.apache.kafka.common.resource.Resource Resources}.
- *
- * The API for this class is still evolving and we may break compatibility in minor releases, if necessary.
  */
-@InterfaceStability.Evolving
+@InterfaceAudience.Public
 public class ResourcePattern {
     /**
      * A special literal resource name that corresponds to 'all resources of a certain type'.
@@ -89,7 +87,7 @@ public class ResourcePattern {
 
     @Override
     public String toString() {
-        return "ResourcePattern(resourceType=" + resourceType + ", name=" + ((name == null) ? "<any>" : name) + ", patternType=" + patternType + ")";
+        return "ResourcePattern(resourceType=" + resourceType + ", name=" + name + ", patternType=" + patternType + ")";
     }
 
     /**

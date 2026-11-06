@@ -16,19 +16,21 @@
  */
 package org.apache.kafka.common.security.oauthbearer.internals.unsecured;
 
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import org.apache.kafka.common.utils.Utils;
+
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
-import org.junit.Test;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class OAuthBearerScopeUtilsTest {
     @Test
     public void validScope() {
         for (String validScope : new String[] {"", "   ", "scope1", " scope1 ", "scope1 Scope2", "scope1   Scope2"}) {
             List<String> parsedScope = OAuthBearerScopeUtils.parseScope(validScope);
-            if (validScope.trim().isEmpty()) {
+            if (Utils.isBlank(validScope)) {
                 assertTrue(parsedScope.isEmpty());
             } else if (validScope.contains("Scope2")) {
                 assertTrue(parsedScope.size() == 2 && parsedScope.get(0).equals("scope1")
@@ -42,12 +44,7 @@ public class OAuthBearerScopeUtilsTest {
     @Test
     public void invalidScope() {
         for (String invalidScope : new String[] {"\"foo", "\\foo"}) {
-            try {
-                OAuthBearerScopeUtils.parseScope(invalidScope);
-                fail("did not detect invalid scope: " + invalidScope);
-            } catch (OAuthBearerConfigException expected) {
-                // empty
-            }
+            assertThrows(OAuthBearerConfigException.class, () -> OAuthBearerScopeUtils.parseScope(invalidScope), "did not detect invalid scope: " + invalidScope);
         }
     }
 }

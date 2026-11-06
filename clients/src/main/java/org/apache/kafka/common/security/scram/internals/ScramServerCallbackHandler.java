@@ -16,7 +16,14 @@
  */
 package org.apache.kafka.common.security.scram.internals;
 
-import java.io.IOException;
+import org.apache.kafka.common.security.auth.AuthenticateCallbackHandler;
+import org.apache.kafka.common.security.authenticator.CredentialCache;
+import org.apache.kafka.common.security.scram.ScramCredential;
+import org.apache.kafka.common.security.scram.ScramCredentialCallback;
+import org.apache.kafka.common.security.token.delegation.TokenInformation;
+import org.apache.kafka.common.security.token.delegation.internals.DelegationTokenCache;
+import org.apache.kafka.common.security.token.delegation.internals.DelegationTokenCredentialCallback;
+
 import java.util.List;
 import java.util.Map;
 
@@ -24,13 +31,6 @@ import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.NameCallback;
 import javax.security.auth.callback.UnsupportedCallbackException;
 import javax.security.auth.login.AppConfigurationEntry;
-
-import org.apache.kafka.common.security.auth.AuthenticateCallbackHandler;
-import org.apache.kafka.common.security.authenticator.CredentialCache;
-import org.apache.kafka.common.security.scram.ScramCredential;
-import org.apache.kafka.common.security.scram.ScramCredentialCallback;
-import org.apache.kafka.common.security.token.delegation.internals.DelegationTokenCache;
-import org.apache.kafka.common.security.token.delegation.internals.DelegationTokenCredentialCallback;
 
 public class ScramServerCallbackHandler implements AuthenticateCallbackHandler {
 
@@ -50,7 +50,7 @@ public class ScramServerCallbackHandler implements AuthenticateCallbackHandler {
     }
 
     @Override
-    public void handle(Callback[] callbacks) throws IOException, UnsupportedCallbackException {
+    public void handle(Callback[] callbacks) throws UnsupportedCallbackException {
         String username = null;
         for (Callback callback : callbacks) {
             if (callback instanceof NameCallback)
@@ -59,6 +59,9 @@ public class ScramServerCallbackHandler implements AuthenticateCallbackHandler {
                 DelegationTokenCredentialCallback tokenCallback = (DelegationTokenCredentialCallback) callback;
                 tokenCallback.scramCredential(tokenCache.credential(saslMechanism, username));
                 tokenCallback.tokenOwner(tokenCache.owner(username));
+                TokenInformation tokenInfo = tokenCache.token(username);
+                if (tokenInfo != null)
+                    tokenCallback.tokenExpiryTimestamp(tokenInfo.expiryTimestamp());
             } else if (callback instanceof ScramCredentialCallback) {
                 ScramCredentialCallback sc = (ScramCredentialCallback) callback;
                 sc.scramCredential(credentialCache.get(username));

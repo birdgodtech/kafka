@@ -17,30 +17,94 @@
 
 package org.apache.kafka.streams.kstream.internals.graph;
 
-import org.apache.kafka.streams.processor.ProcessorSupplier;
+import org.apache.kafka.streams.internals.ApiUtils;
+import org.apache.kafka.streams.processor.api.FixedKeyProcessorSupplier;
+import org.apache.kafka.streams.processor.api.ProcessorSupplier;
+import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
+import org.apache.kafka.streams.state.StoreBuilder;
+
+import java.util.Set;
 
 /**
- * Class used to represent a {@link ProcessorSupplier} and the name
+ * Class used to represent a {@link ProcessorSupplier} or {@link FixedKeyProcessorSupplier} and the name
  * used to register it with the {@link org.apache.kafka.streams.processor.internals.InternalTopologyBuilder}
  *
  * Used by the Join nodes as there are several parameters, this abstraction helps
  * keep the number of arguments more reasonable.
+ *
+ * @see ProcessorSupplier
+ * @see FixedKeyProcessorSupplier
  */
-public class ProcessorParameters<K, V> {
+public class ProcessorParameters<KIn, VIn, KOut, VOut> {
 
-    private final ProcessorSupplier<K, V> processorSupplier;
+    private final ProcessorSupplier<KIn, VIn, KOut, VOut> processorSupplier;
+    private final FixedKeyProcessorSupplier<KIn, VIn, VOut> fixedKeyProcessorSupplier;
     private final String processorName;
 
-    public ProcessorParameters(final ProcessorSupplier<K, V> processorSupplier, final String processorName) {
+    public ProcessorParameters(final ProcessorSupplier<KIn, VIn, KOut, VOut> processorSupplier,
+                               final String processorName) {
         this.processorSupplier = processorSupplier;
+        fixedKeyProcessorSupplier = null;
         this.processorName = processorName;
     }
 
-    public ProcessorSupplier<K, V> processorSupplier() {
+    public ProcessorParameters(final FixedKeyProcessorSupplier<KIn, VIn, VOut> processorSupplier,
+                               final String processorName) {
+        this.processorSupplier = null;
+        fixedKeyProcessorSupplier = processorSupplier;
+        this.processorName = processorName;
+    }
+
+    public ProcessorSupplier<KIn, VIn, KOut, VOut> processorSupplier() {
         return processorSupplier;
+    }
+
+    public FixedKeyProcessorSupplier<KIn, VIn, VOut> fixedKeyProcessorSupplier() {
+        return fixedKeyProcessorSupplier;
+    }
+
+    public void addProcessorTo(final InternalTopologyBuilder topologyBuilder, final String... parentNodeNames) {
+        if (processorSupplier != null) {
+            ApiUtils.checkSupplier(processorSupplier);
+
+            final ProcessorSupplier<KIn, VIn, KOut, VOut> wrapped =
+                topologyBuilder.wrapProcessorSupplier(processorName, processorSupplier);
+
+            topologyBuilder.addProcessor(processorName, wrapped, parentNodeNames);
+            final Set<StoreBuilder<?>> stores = wrapped.stores();
+            if (stores != null) {
+                for (final StoreBuilder<?> storeBuilder : stores) {
+                    topologyBuilder.addStateStore(storeBuilder, processorName);
+                }
+            }
+        }
+
+        if (fixedKeyProcessorSupplier != null) {
+            ApiUtils.checkSupplier(fixedKeyProcessorSupplier);
+
+            final FixedKeyProcessorSupplier<KIn, VIn, VOut> wrapped =
+                topologyBuilder.wrapFixedKeyProcessorSupplier(processorName, fixedKeyProcessorSupplier);
+
+            topologyBuilder.addProcessor(processorName, wrapped, parentNodeNames);
+            final Set<StoreBuilder<?>> stores = wrapped.stores();
+            if (stores != null) {
+                for (final StoreBuilder<?> storeBuilder : stores) {
+                    topologyBuilder.addStateStore(storeBuilder, processorName);
+                }
+            }
+        }
     }
 
     public String processorName() {
         return processorName;
+    }
+
+    @Override
+    public String toString() {
+        return "ProcessorParameters{" +
+            "processor supplier class=" + (processorSupplier != null ? processorSupplier.getClass() : "null") +
+            ", fixed key processor supplier class=" + (fixedKeyProcessorSupplier != null ? fixedKeyProcessorSupplier.getClass() : "null") +
+            ", processor name='" + processorName + '\'' +
+            '}';
     }
 }

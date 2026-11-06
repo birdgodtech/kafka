@@ -17,7 +17,6 @@
 package org.apache.kafka.streams.state.internals;
 
 import org.apache.kafka.streams.KeyValue;
-import org.apache.kafka.streams.errors.InvalidStateStoreException;
 import org.apache.kafka.streams.state.KeyValueIterator;
 
 import java.util.NoSuchElementException;
@@ -25,7 +24,7 @@ import java.util.NoSuchElementException;
 /**
  * Optimized {@link KeyValueIterator} used when the same element could be peeked multiple times.
  */
-class DelegatingPeekingKeyValueIterator<K, V> implements KeyValueIterator<K, V>, PeekingKeyValueIterator<K, V> {
+public class DelegatingPeekingKeyValueIterator<K, V> implements KeyValueIterator<K, V>, PeekingKeyValueIterator<K, V> {
     private final KeyValueIterator<K, V> underlying;
     private final String storeName;
     private KeyValue<K, V> next;
@@ -54,7 +53,7 @@ class DelegatingPeekingKeyValueIterator<K, V> implements KeyValueIterator<K, V>,
     @Override
     public synchronized boolean hasNext() {
         if (!open) {
-            throw new InvalidStateStoreException(String.format("Store %s has closed", storeName));
+            throw new IllegalStateException(String.format("Iterator for store %s has already been closed.", storeName));
         }
         if (next != null) {
             return true;
@@ -76,11 +75,6 @@ class DelegatingPeekingKeyValueIterator<K, V> implements KeyValueIterator<K, V>,
         final KeyValue<K, V> result = next;
         next = null;
         return result;
-    }
-
-    @Override
-    public void remove() {
-        throw new UnsupportedOperationException("remove() is not supported in " + getClass().getName());
     }
 
     @Override

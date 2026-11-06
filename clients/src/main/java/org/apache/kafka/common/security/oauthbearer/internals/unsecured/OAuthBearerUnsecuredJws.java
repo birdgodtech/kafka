@@ -16,6 +16,13 @@
  */
 package org.apache.kafka.common.security.oauthbearer.internals.unsecured;
 
+import org.apache.kafka.common.security.oauthbearer.OAuthBearerToken;
+import org.apache.kafka.common.utils.Utils;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeType;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -23,25 +30,17 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
 
-import org.apache.kafka.common.security.oauthbearer.OAuthBearerToken;
-
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.JsonNodeType;
-import com.fasterxml.jackson.databind.node.NumericNode;
-
 /**
  * A simple unsecured JWS implementation. The '{@code nbf}' claim is ignored if
  * it is given because the related logic is not required for Kafka testing and
  * development purposes.
- * 
+ *
  * @see <a href="https://tools.ietf.org/html/rfc7515">RFC 7515</a>
  */
 public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
@@ -58,7 +57,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
 
     /**
      * Constructor with the given principal and scope claim names
-     * 
+     *
      * @param compactSerialization
      *            the compact serialization to parse as an unsecured JWS
      * @param principalClaimName
@@ -104,7 +103,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
                     OAuthBearerValidationResult.newFailure("No expiration time in JWT"));
         lifetime = convertClaimTimeInSecondsToMs(expirationTimeSeconds);
         String principalName = claim(this.principalClaimName, String.class);
-        if (principalName == null || principalName.trim().isEmpty())
+        if (Utils.isBlank(principalName))
             throw new OAuthBearerIllegalTokenException(OAuthBearerValidationResult
                     .newFailure("No principal name in JWT claim: " + this.principalClaimName));
         this.principalName = principalName;
@@ -118,19 +117,19 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
 
     /**
      * Return the 3 or 5 dot-separated sections of the JWT compact serialization
-     * 
+     *
      * @return the 3 or 5 dot-separated sections of the JWT compact serialization
      */
-    public List<String> splits() {
+    public final List<String> splits() {
         return splits;
     }
 
     /**
      * Return the JOSE Header as a {@code Map}
-     * 
+     *
      * @return the JOSE header
      */
-    public Map<String, Object> header() {
+    public final Map<String, Object> header() {
         return header;
     }
 
@@ -156,16 +155,16 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
 
     /**
      * Return the JWT Claim Set as a {@code Map}
-     * 
+     *
      * @return the (always non-null but possibly empty) claims
      */
-    public Map<String, Object> claims() {
+    public final Map<String, Object> claims() {
         return claims;
     }
 
     /**
      * Return the (always non-null/non-empty) principal claim name
-     * 
+     *
      * @return the (always non-null/non-empty) principal claim name
      */
     public String principalClaimName() {
@@ -174,7 +173,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
 
     /**
      * Return the (always non-null/non-empty) scope claim name
-     * 
+     *
      * @return the (always non-null/non-empty) scope claim name
      */
     public String scopeClaimName() {
@@ -183,7 +182,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
 
     /**
      * Indicate if the claim exists and is the given type
-     * 
+     *
      * @param claimName
      *            the mandatory JWT claim name
      * @param type
@@ -191,7 +190,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
      *            Number.class, or List.class
      * @return true if the claim exists and is the given type, otherwise false
      */
-    public boolean isClaimType(String claimName, Class<?> type) {
+    public final boolean isClaimType(String claimName, Class<?> type) {
         Object value = rawClaim(claimName);
         Objects.requireNonNull(type);
         if (value == null)
@@ -205,7 +204,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
 
     /**
      * Extract a claim of the given type
-     * 
+     *
      * @param claimName
      *            the mandatory JWT claim name
      * @param type
@@ -215,7 +214,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
      * @throws OAuthBearerIllegalTokenException
      *             if the claim exists but is not the given type
      */
-    public <T> T claim(String claimName, Class<T> type) throws OAuthBearerIllegalTokenException {
+    public final <T> T claim(String claimName, Class<T> type) throws OAuthBearerIllegalTokenException {
         Object value = rawClaim(claimName);
         try {
             return Objects.requireNonNull(type).cast(value);
@@ -228,12 +227,12 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
 
     /**
      * Extract a claim in its raw form
-     * 
+     *
      * @param claimName
      *            the mandatory JWT claim name
      * @return the raw claim value, if it exists, otherwise null
      */
-    public Object rawClaim(String claimName) {
+    public final Object rawClaim(String claimName) {
         return claims().get(Objects.requireNonNull(claimName));
     }
 
@@ -241,21 +240,21 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
      * Return the
      * <a href="https://tools.ietf.org/html/rfc7519#section-4.1.4">Expiration
      * Time</a> claim
-     * 
+     *
      * @return the <a href=
      *         "https://tools.ietf.org/html/rfc7519#section-4.1.4">Expiration
      *         Time</a> claim if available, otherwise null
      * @throws OAuthBearerIllegalTokenException
      *             if the claim value is the incorrect type
      */
-    public Number expirationTime() throws OAuthBearerIllegalTokenException {
+    public final Number expirationTime() throws OAuthBearerIllegalTokenException {
         return claim("exp", Number.class);
     }
 
     /**
      * Return the <a href="https://tools.ietf.org/html/rfc7519#section-4.1.6">Issued
      * At</a> claim
-     * 
+     *
      * @return the
      *         <a href= "https://tools.ietf.org/html/rfc7519#section-4.1.6">Issued
      *         At</a> claim if available, otherwise null
@@ -269,7 +268,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
     /**
      * Return the
      * <a href="https://tools.ietf.org/html/rfc7519#section-4.1.2">Subject</a> claim
-     * 
+     *
      * @return the <a href=
      *         "https://tools.ietf.org/html/rfc7519#section-4.1.2">Subject</a> claim
      *         if available, otherwise null
@@ -284,7 +283,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
      * Decode the given Base64URL-encoded value, parse the resulting JSON as a JSON
      * object, and return the map of member names to their values (each value being
      * represented as either a String, a Number, or a List of Strings).
-     * 
+     *
      * @param split
      *            the value to decode and parse
      * @return the map of JSON member names to their String, Number, or String List
@@ -295,12 +294,11 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
     public static Map<String, Object> toMap(String split) throws OAuthBearerIllegalTokenException {
         Map<String, Object> retval = new HashMap<>();
         try {
-            byte[] decode = Base64.getDecoder().decode(split);
+            byte[] decode = Base64.getUrlDecoder().decode(split);
             JsonNode jsonNode = new ObjectMapper().readTree(decode);
             if (jsonNode == null)
                 throw new OAuthBearerIllegalTokenException(OAuthBearerValidationResult.newFailure("malformed JSON"));
-            for (Iterator<Entry<String, JsonNode>> iterator = jsonNode.fields(); iterator.hasNext();) {
-                Entry<String, JsonNode> entry = iterator.next();
+            for (Entry<String, JsonNode> entry : jsonNode.properties()) {
                 retval.put(entry.getKey(), convert(entry.getValue()));
             }
             return Collections.unmodifiableMap(retval);
@@ -326,12 +324,11 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
     private static Object convert(JsonNode value) {
         if (value.isArray()) {
             List<String> retvalList = new ArrayList<>();
-            for (JsonNode arrayElement : value) {
+            for (JsonNode arrayElement : value)
                 retvalList.add(arrayElement.asText());
-            }
             return retvalList;
         }
-        return value.getNodeType() == JsonNodeType.NUMBER ? ((NumericNode) value).numberValue() : value.asText();
+        return value.getNodeType() == JsonNodeType.NUMBER ? value.numberValue() : value.asText();
     }
 
     private Long calculateStartTimeMs() throws OAuthBearerIllegalTokenException {
@@ -344,25 +341,23 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
     }
 
     private Set<String> calculateScope() {
-        String scopeClaimName = scopeClaimName();
+        String scopeClaimName = this.scopeClaimName;
         if (isClaimType(scopeClaimName, String.class)) {
             String scopeClaimValue = claim(scopeClaimName, String.class);
-            if (scopeClaimValue.trim().isEmpty())
-                return Collections.emptySet();
+            if (Utils.isBlank(scopeClaimValue))
+                return Set.of();
             else {
-                Set<String> retval = new HashSet<>();
-                retval.add(scopeClaimValue.trim());
-                return Collections.unmodifiableSet(retval);
+                return Set.of(scopeClaimValue.trim());
             }
         }
         List<?> scopeClaimValue = claim(scopeClaimName, List.class);
         if (scopeClaimValue == null || scopeClaimValue.isEmpty())
-            return Collections.emptySet();
+            return Set.of();
         @SuppressWarnings("unchecked")
         List<String> stringList = (List<String>) scopeClaimValue;
         Set<String> retval = new HashSet<>();
         for (String scope : stringList) {
-            if (scope != null && !scope.trim().isEmpty()) {
+            if (!Utils.isBlank(scope)) {
                 retval.add(scope.trim());
             }
         }

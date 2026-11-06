@@ -14,33 +14,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.serialization;
 
-import java.util.Map;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
+@InterfaceAudience.Public
 public class FloatSerializer implements Serializer<Float> {
-
-    @Override
-    public void configure(final Map<String, ?> configs, final boolean isKey) {
-        // nothing to do
-    }
-
     @Override
     public byte[] serialize(final String topic, final Float data) {
         if (data == null)
             return null;
 
-        long bits = Float.floatToRawIntBits(data);
+        int bits = Float.floatToRawIntBits(data);
         return new byte[] {
             (byte) (bits >>> 24),
             (byte) (bits >>> 16),
             (byte) (bits >>> 8),
             (byte) bits
         };
-    }
-
-    @Override
-    public void close() {
-        // nothing to do
     }
 }

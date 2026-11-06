@@ -14,16 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.serialization;
 
-import java.util.Map;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
+@InterfaceAudience.Public
 public class LongSerializer implements Serializer<Long> {
-
-    public void configure(Map<String, ?> configs, boolean isKey) {
-        // nothing to do
-    }
-
     public byte[] serialize(String topic, Long data) {
         if (data == null)
             return null;
@@ -38,9 +35,5 @@ public class LongSerializer implements Serializer<Long> {
             (byte) (data >>> 8),
             data.byteValue()
         };
-    }
-
-    public void close() {
-        // nothing to do
     }
 }

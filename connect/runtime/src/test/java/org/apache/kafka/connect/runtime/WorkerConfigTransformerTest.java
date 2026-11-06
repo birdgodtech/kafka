@@ -16,26 +16,33 @@
  */
 package org.apache.kafka.connect.runtime;
 
-import org.apache.kafka.common.config.ConfigChangeCallback;
 import org.apache.kafka.common.config.ConfigData;
 import org.apache.kafka.common.config.provider.ConfigProvider;
-import org.easymock.EasyMock;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.powermock.api.easymock.PowerMock;
-import org.powermock.api.easymock.annotation.Mock;
-import org.powermock.modules.junit4.PowerMockRunner;
 
-import java.util.Collections;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
+
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.powermock.api.easymock.PowerMock.replayAll;
+import static org.apache.kafka.connect.runtime.ConnectorConfig.CONFIG_RELOAD_ACTION_CONFIG;
+import static org.apache.kafka.connect.runtime.ConnectorConfig.CONFIG_RELOAD_ACTION_NONE;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.notNull;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
-@RunWith(PowerMockRunner.class)
+@ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.STRICT_STUBS)
 public class WorkerConfigTransformerTest {
 
     public static final String MY_KEY = "myKey";
@@ -48,67 +55,75 @@ public class WorkerConfigTransformerTest {
     public static final String TEST_RESULT_WITH_TTL = "testResultWithTTL";
     public static final String TEST_RESULT_WITH_LONGER_TTL = "testResultWithLongerTTL";
 
-    @Mock private Herder herder;
-    @Mock private Worker worker;
-    @Mock private HerderRequest requestId;
+    @Mock
+    private Herder herder;
+    @Mock
+    private Worker worker;
+    @Mock
+    private HerderRequest requestId;
     private WorkerConfigTransformer configTransformer;
 
-    @Before
+    @BeforeEach
     public void setup() {
-        worker = PowerMock.createMock(Worker.class);
-        herder = PowerMock.createMock(Herder.class);
-        configTransformer = new WorkerConfigTransformer(worker, Collections.singletonMap("test", new TestConfigProvider()));
+        configTransformer = new WorkerConfigTransformer(worker, Map.of("test", new TestConfigProvider()));
     }
 
     @Test
-    public void testReplaceVariable() throws Exception {
-        Map<String, String> result = configTransformer.transform(MY_CONNECTOR, Collections.singletonMap(MY_KEY, "${test:testPath:testKey}"));
+    public void testReplaceVariable() {
+        // Execution
+        Map<String, String> result = configTransformer.transform(MY_CONNECTOR, Map.of(MY_KEY, "${test:testPath:testKey}"));
+
+        // Assertions
         assertEquals(TEST_RESULT, result.get(MY_KEY));
     }
 
     @Test
-    public void testReplaceVariableWithTTL() throws Exception {
-        EasyMock.expect(worker.herder()).andReturn(herder);
-        EasyMock.expect(herder.connectorConfigReloadAction(MY_CONNECTOR)).andReturn(Herder.ConfigReloadAction.NONE);
+    public void testReplaceVariableWithTTL() {
+        // Execution
+        Map<String, String> props = new HashMap<>();
+        props.put(MY_KEY, "${test:testPath:testKeyWithTTL}");
+        props.put(CONFIG_RELOAD_ACTION_CONFIG, CONFIG_RELOAD_ACTION_NONE);
+        Map<String, String> result = configTransformer.transform(MY_CONNECTOR, props);
 
-        replayAll();
-
-        Map<String, String> result = configTransformer.transform(MY_CONNECTOR, Collections.singletonMap(MY_KEY, "${test:testPath:testKeyWithTTL}"));
+        // Assertions
         assertEquals(TEST_RESULT_WITH_TTL, result.get(MY_KEY));
     }
 
     @Test
-    public void testReplaceVariableWithTTLAndScheduleRestart() throws Exception {
-        EasyMock.expect(worker.herder()).andReturn(herder);
-        EasyMock.expect(herder.connectorConfigReloadAction(MY_CONNECTOR)).andReturn(Herder.ConfigReloadAction.RESTART);
-        EasyMock.expect(herder.restartConnector(1L, MY_CONNECTOR, null)).andReturn(requestId);
+    public void testReplaceVariableWithTTLAndScheduleRestart() {
+        // Setup
+        when(worker.herder()).thenReturn(herder);
+        when(herder.restartConnector(eq(1L), eq(MY_CONNECTOR), notNull())).thenReturn(requestId);
 
-        replayAll();
+        // Execution
+        Map<String, String> result = configTransformer.transform(MY_CONNECTOR, Map.of(MY_KEY, "${test:testPath:testKeyWithTTL}"));
 
-        Map<String, String> result = configTransformer.transform(MY_CONNECTOR, Collections.singletonMap(MY_KEY, "${test:testPath:testKeyWithTTL}"));
+        // Assertions
         assertEquals(TEST_RESULT_WITH_TTL, result.get(MY_KEY));
+        verify(herder).restartConnector(eq(1L), eq(MY_CONNECTOR), notNull());
     }
 
     @Test
-    public void testReplaceVariableWithTTLFirstCancelThenScheduleRestart() throws Exception {
-        EasyMock.expect(worker.herder()).andReturn(herder);
-        EasyMock.expect(herder.connectorConfigReloadAction(MY_CONNECTOR)).andReturn(Herder.ConfigReloadAction.RESTART);
-        EasyMock.expect(herder.restartConnector(1L, MY_CONNECTOR, null)).andReturn(requestId);
+    public void testReplaceVariableWithTTLFirstCancelThenScheduleRestart() {
+        // Setup
+        when(worker.herder()).thenReturn(herder);
+        when(herder.restartConnector(eq(1L), eq(MY_CONNECTOR), notNull())).thenReturn(requestId);
+        when(herder.restartConnector(eq(10L), eq(MY_CONNECTOR), notNull())).thenReturn(requestId);
 
-        EasyMock.expect(worker.herder()).andReturn(herder);
-        EasyMock.expect(herder.connectorConfigReloadAction(MY_CONNECTOR)).andReturn(Herder.ConfigReloadAction.RESTART);
-        EasyMock.expectLastCall();
-        requestId.cancel();
-        EasyMock.expectLastCall();
-        EasyMock.expect(herder.restartConnector(10L, MY_CONNECTOR, null)).andReturn(requestId);
+        // Execution
+        Map<String, String> result = configTransformer.transform(MY_CONNECTOR, Map.of(MY_KEY, "${test:testPath:testKeyWithTTL}"));
 
-        replayAll();
-
-        Map<String, String> result = configTransformer.transform(MY_CONNECTOR, Collections.singletonMap(MY_KEY, "${test:testPath:testKeyWithTTL}"));
+        // Assertions
         assertEquals(TEST_RESULT_WITH_TTL, result.get(MY_KEY));
+        verify(herder).restartConnector(eq(1L), eq(MY_CONNECTOR), notNull());
 
-        result = configTransformer.transform(MY_CONNECTOR, Collections.singletonMap(MY_KEY, "${test:testPath:testKeyWithLongerTTL}"));
+        // Execution
+        result = configTransformer.transform(MY_CONNECTOR, Map.of(MY_KEY, "${test:testPath:testKeyWithLongerTTL}"));
+
+        // Assertions
         assertEquals(TEST_RESULT_WITH_LONGER_TTL, result.get(MY_KEY));
+        verify(requestId, times(1)).cancel();
+        verify(herder).restartConnector(eq(10L), eq(MY_CONNECTOR), notNull());
     }
 
     @Test
@@ -118,34 +133,30 @@ public class WorkerConfigTransformerTest {
 
     public static class TestConfigProvider implements ConfigProvider {
 
+        @Override
         public void configure(Map<String, ?> configs) {
         }
 
+        @Override
         public ConfigData get(String path) {
             return null;
         }
 
+        @Override
         public ConfigData get(String path, Set<String> keys) {
             if (path.equals(TEST_PATH)) {
                 if (keys.contains(TEST_KEY)) {
-                    return new ConfigData(Collections.singletonMap(TEST_KEY, TEST_RESULT));
+                    return new ConfigData(Map.of(TEST_KEY, TEST_RESULT));
                 } else if (keys.contains(TEST_KEY_WITH_TTL)) {
-                    return new ConfigData(Collections.singletonMap(TEST_KEY_WITH_TTL, TEST_RESULT_WITH_TTL), 1L);
+                    return new ConfigData(Map.of(TEST_KEY_WITH_TTL, TEST_RESULT_WITH_TTL), 1L);
                 } else if (keys.contains(TEST_KEY_WITH_LONGER_TTL)) {
-                    return new ConfigData(Collections.singletonMap(TEST_KEY_WITH_LONGER_TTL, TEST_RESULT_WITH_LONGER_TTL), 10L);
+                    return new ConfigData(Map.of(TEST_KEY_WITH_LONGER_TTL, TEST_RESULT_WITH_LONGER_TTL), 10L);
                 }
             }
-            return new ConfigData(Collections.emptyMap());
+            return new ConfigData(Map.of());
         }
 
-        public void subscribe(String path, Set<String> keys, ConfigChangeCallback callback) {
-            throw new UnsupportedOperationException();
-        }
-
-        public void unsubscribe(String path, Set<String> keys) {
-            throw new UnsupportedOperationException();
-        }
-
+        @Override
         public void close() {
         }
     }

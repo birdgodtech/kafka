@@ -16,19 +16,27 @@
  */
 package org.apache.kafka.common.security.plain.internals;
 
+import org.apache.kafka.common.errors.SaslAuthenticationException;
+import org.apache.kafka.common.security.JaasContext;
+import org.apache.kafka.common.security.authenticator.TestJaasConfig;
 import org.apache.kafka.common.security.plain.PlainLoginModule;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.kafka.common.utils.Utils;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-
-import org.apache.kafka.common.errors.SaslAuthenticationException;
-import org.apache.kafka.common.security.JaasContext;
-import org.apache.kafka.common.security.authenticator.TestJaasConfig;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.AdditionalMatchers.aryEq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mockStatic;
 
 public class PlainSaslServerTest {
 
@@ -37,36 +45,98 @@ public class PlainSaslServerTest {
     private static final String USER_B = "userB";
     private static final String PASSWORD_B = "passwordB";
 
+    private PlainServerCallbackHandler callbackHandler;
     private PlainSaslServer saslServer;
 
-    @Before
-    public void setUp() throws Exception {
+    @BeforeEach
+    public void setUp() {
         TestJaasConfig jaasConfig = new TestJaasConfig();
         Map<String, Object> options = new HashMap<>();
         options.put("user_" + USER_A, PASSWORD_A);
         options.put("user_" + USER_B, PASSWORD_B);
         jaasConfig.addEntry("jaasContext", PlainLoginModule.class.getName(), options);
         JaasContext jaasContext = new JaasContext("jaasContext", JaasContext.Type.SERVER, jaasConfig, null);
-        PlainServerCallbackHandler callbackHandler = new PlainServerCallbackHandler();
+        callbackHandler = new PlainServerCallbackHandler();
         callbackHandler.configure(null, "PLAIN", jaasContext.configurationEntries());
         saslServer = new PlainSaslServer(callbackHandler);
     }
 
     @Test
-    public void noAuthorizationIdSpecified() throws Exception {
+    public void noAuthorizationIdSpecified() {
         byte[] nextChallenge = saslServer.evaluateResponse(saslMessage("", USER_A, PASSWORD_A));
         assertEquals(0, nextChallenge.length);
     }
 
     @Test
-    public void authorizatonIdEqualsAuthenticationId() throws Exception {
+    public void authorizationIdEqualsAuthenticationId() {
         byte[] nextChallenge = saslServer.evaluateResponse(saslMessage(USER_A, USER_A, PASSWORD_A));
         assertEquals(0, nextChallenge.length);
     }
 
-    @Test(expected = SaslAuthenticationException.class)
-    public void authorizatonIdNotEqualsAuthenticationId() throws Exception {
-        saslServer.evaluateResponse(saslMessage(USER_B, USER_A, PASSWORD_A));
+    @Test
+    public void authorizationIdNotEqualsAuthenticationId() {
+        assertThrows(SaslAuthenticationException.class, () -> saslServer.evaluateResponse(saslMessage(USER_B, USER_A, PASSWORD_A)));
+    }
+
+    @Test
+    public void unknownUserOrInvalidPassword() throws Exception {
+        Exception e = assertThrows(SaslAuthenticationException.class, () ->
+            saslServer.evaluateResponse(saslMessage("", "unknownUser", PASSWORD_A)));
+        assertEquals("Authentication failed: Invalid username or password", e.getMessage());
+
+        e = assertThrows(SaslAuthenticationException.class, () ->
+            saslServer.evaluateResponse(saslMessage("", USER_A, PASSWORD_B)));
+        assertEquals("Authentication failed: Invalid username or password", e.getMessage());
+
+        assertFalse(callbackHandler.authenticate("unknownUser", new char[] {'\0'}));
+    }
+
+    @Test
+    public void passwordIsComparedForUnknownUser() {
+        try (MockedStatic<Utils> mockedUtils = mockStatic(Utils.class, Mockito.CALLS_REAL_METHODS)) {
+            assertThrows(SaslAuthenticationException.class, () ->
+                saslServer.evaluateResponse(saslMessage("", "unknownUser", PASSWORD_A)));
+            mockedUtils.verify(() -> Utils.isEqualConstantTime(aryEq(PASSWORD_A.toCharArray()), any(char[].class)));
+        }
+    }
+
+    @Test
+    public void emptyTokens() {
+        Exception e = assertThrows(SaslAuthenticationException.class, () ->
+            saslServer.evaluateResponse(saslMessage("", "", "")));
+        assertEquals("Authentication failed: username not specified", e.getMessage());
+
+        e = assertThrows(SaslAuthenticationException.class, () ->
+            saslServer.evaluateResponse(saslMessage("", "", "p")));
+        assertEquals("Authentication failed: username not specified", e.getMessage());
+
+        e = assertThrows(SaslAuthenticationException.class, () ->
+            saslServer.evaluateResponse(saslMessage("", "u", "")));
+        assertEquals("Authentication failed: password not specified", e.getMessage());
+
+        e = assertThrows(SaslAuthenticationException.class, () ->
+            saslServer.evaluateResponse(saslMessage("a", "", "")));
+        assertEquals("Authentication failed: username not specified", e.getMessage());
+
+        e = assertThrows(SaslAuthenticationException.class, () ->
+            saslServer.evaluateResponse(saslMessage("a", "", "p")));
+        assertEquals("Authentication failed: username not specified", e.getMessage());
+
+        e = assertThrows(SaslAuthenticationException.class, () ->
+            saslServer.evaluateResponse(saslMessage("a", "u", "")));
+        assertEquals("Authentication failed: password not specified", e.getMessage());
+
+        String nul = "\u0000";
+
+        e = assertThrows(SaslAuthenticationException.class, () ->
+            saslServer.evaluateResponse(
+                String.format("%s%s%s%s%s%s", "a", nul, "u", nul, "p", nul).getBytes(StandardCharsets.UTF_8)));
+        assertEquals("Invalid SASL/PLAIN response: expected 3 tokens, got 4", e.getMessage());
+
+        e = assertThrows(SaslAuthenticationException.class, () ->
+            saslServer.evaluateResponse(
+                String.format("%s%s%s", "", nul, "u").getBytes(StandardCharsets.UTF_8)));
+        assertEquals("Invalid SASL/PLAIN response: expected 3 tokens, got 2", e.getMessage());
     }
 
     private byte[] saslMessage(String authorizationId, String userName, String password) {

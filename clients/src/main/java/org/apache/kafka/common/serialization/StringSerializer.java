@@ -16,17 +16,22 @@
  */
 package org.apache.kafka.common.serialization;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.errors.SerializationException;
 
-import java.io.UnsupportedEncodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.IllegalCharsetNameException;
+import java.nio.charset.StandardCharsets;
+import java.nio.charset.UnsupportedCharsetException;
 import java.util.Map;
 
 /**
  *  String encoding defaults to UTF8 and can be customized by setting the property key.serializer.encoding,
  *  value.serializer.encoding or serializer.encoding. The first two take precedence over the last.
  */
+@InterfaceAudience.Public
 public class StringSerializer implements Serializer<String> {
-    private String encoding = "UTF8";
+    private Charset encoding = StandardCharsets.UTF_8;
 
     @Override
     public void configure(Map<String, ?> configs, boolean isKey) {
@@ -34,24 +39,21 @@ public class StringSerializer implements Serializer<String> {
         Object encodingValue = configs.get(propertyName);
         if (encodingValue == null)
             encodingValue = configs.get("serializer.encoding");
-        if (encodingValue instanceof String)
-            encoding = (String) encodingValue;
-    }
-
-    @Override
-    public byte[] serialize(String topic, String data) {
-        try {
-            if (data == null)
-                return null;
-            else
-                return data.getBytes(encoding);
-        } catch (UnsupportedEncodingException e) {
-            throw new SerializationException("Error when serializing string to byte[] due to unsupported encoding " + encoding);
+        if (encodingValue instanceof String) {
+            String encodingName = (String) encodingValue;
+            try {
+                encoding = Charset.forName(encodingName);
+            } catch (UnsupportedCharsetException | IllegalCharsetNameException e) {
+                throw new SerializationException("Unsupported encoding " + encodingName, e);
+            }
         }
     }
 
     @Override
-    public void close() {
-        // nothing to do
+    public byte[] serialize(String topic, String data) {
+        if (data == null)
+            return null;
+        else
+            return data.getBytes(encoding);
     }
 }

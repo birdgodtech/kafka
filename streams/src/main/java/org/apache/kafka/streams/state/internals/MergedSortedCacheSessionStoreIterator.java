@@ -32,8 +32,9 @@ class MergedSortedCacheSessionStoreIterator extends AbstractMergedSortedCacheSto
 
     MergedSortedCacheSessionStoreIterator(final PeekingKeyValueIterator<Bytes, LRUCacheEntry> cacheIterator,
                                           final KeyValueIterator<Windowed<Bytes>, byte[]> storeIterator,
-                                          final SegmentedCacheFunction cacheFunction) {
-        super(cacheIterator, storeIterator);
+                                          final SegmentedCacheFunction cacheFunction,
+                                          final boolean forward) {
+        super(cacheIterator, storeIterator, forward);
         this.cacheFunction = cacheFunction;
     }
 
@@ -63,7 +64,7 @@ class MergedSortedCacheSessionStoreIterator extends AbstractMergedSortedCacheSto
 
     @Override
     public int compare(final Bytes cacheKey, final Windowed<Bytes> storeKey) {
-        final Bytes storeKeyBytes = Bytes.wrap(SessionKeySchema.toBinary(storeKey));
+        final Bytes storeKeyBytes = SessionKeySchema.toBinary(storeKey);
         return cacheFunction.compareSegmentedKeys(cacheKey, storeKeyBytes);
     }
 }

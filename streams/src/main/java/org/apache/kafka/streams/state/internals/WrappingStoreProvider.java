@@ -16,40 +16,70 @@
  */
 package org.apache.kafka.streams.state.internals;
 
+import org.apache.kafka.common.IsolationLevel;
+import org.apache.kafka.streams.StoreQueryParameters;
 import org.apache.kafka.streams.errors.InvalidStateStoreException;
-import org.apache.kafka.streams.processor.StateStore;
+import org.apache.kafka.streams.errors.InvalidStateStorePartitionException;
 import org.apache.kafka.streams.state.QueryableStoreType;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
 /**
  * Provides a wrapper over multiple underlying {@link StateStoreProvider}s
  */
+@SuppressWarnings("rawtypes")
 public class WrappingStoreProvider implements StateStoreProvider {
 
-    private final List<StateStoreProvider> storeProviders;
+    private final Collection<StreamThreadStateStoreProvider> storeProviders;
+    private StoreQueryParameters storeQueryParameters;
+    private final IsolationLevel defaultIsolationLevel;
 
-    public WrappingStoreProvider(final List<StateStoreProvider> storeProviders) {
-        this.storeProviders = storeProviders;
+    public WrappingStoreProvider(final Collection<StreamThreadStateStoreProvider> storeProviders,
+                                 final StoreQueryParameters storeQueryParameters) {
+        this(storeProviders, storeQueryParameters, IsolationLevel.READ_UNCOMMITTED);
     }
 
-    /**
-     * Provides access to {@link org.apache.kafka.streams.processor.StateStore}s accepted
-     * by {@link QueryableStoreType#accepts(StateStore)}
-     * @param storeName  name of the store
-     * @param type      The {@link QueryableStoreType}
-     * @param <T>       The type of the Store, for example, {@link org.apache.kafka.streams.state.ReadOnlyKeyValueStore}
-     * @return  a List of all the stores with the storeName and are accepted by {@link QueryableStoreType#accepts(StateStore)}
-     */
-    public <T> List<T> stores(final String storeName, QueryableStoreType<T> type) {
+    WrappingStoreProvider(final Collection<StreamThreadStateStoreProvider> storeProviders,
+                          final StoreQueryParameters storeQueryParameters,
+                          final IsolationLevel defaultIsolationLevel) {
+        this.storeProviders = storeProviders;
+        this.storeQueryParameters = storeQueryParameters;
+        this.defaultIsolationLevel = defaultIsolationLevel;
+    }
+
+    @Override
+    public IsolationLevel defaultIsolationLevel() {
+        return defaultIsolationLevel;
+    }
+
+    //visible for testing
+    public void setStoreQueryParameters(final StoreQueryParameters storeQueryParameters) {
+        this.storeQueryParameters = storeQueryParameters;
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public <T> List<T> stores(final String storeName,
+                              final QueryableStoreType<T> queryableStoreType) {
         final List<T> allStores = new ArrayList<>();
-        for (StateStoreProvider provider : storeProviders) {
-            final List<T> stores =
-                provider.stores(storeName, type);
-            allStores.addAll(stores);
+        for (final StreamThreadStateStoreProvider storeProvider : storeProviders) {
+            final List<T> stores = storeProvider.stores(storeQueryParameters);
+            if (!stores.isEmpty()) {
+                allStores.addAll(stores);
+                if (storeQueryParameters.partition() != null) {
+                    break;
+                }
+            }
         }
         if (allStores.isEmpty()) {
+            if (storeQueryParameters.partition() != null) {
+                throw new InvalidStateStorePartitionException(
+                        String.format("The specified partition %d for store %s does not exist.",
+                                storeQueryParameters.partition(),
+                                storeName));
+            }
             throw new InvalidStateStoreException("The state store, " + storeName + ", may have migrated to another instance.");
         }
         return allStores;

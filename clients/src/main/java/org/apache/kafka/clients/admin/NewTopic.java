@@ -17,20 +17,29 @@
 
 package org.apache.kafka.clients.admin;
 
-import org.apache.kafka.common.requests.CreateTopicsRequest.TopicDetails;
+import org.apache.kafka.common.annotation.InterfaceAudience;
+import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableReplicaAssignment;
+import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopic;
+import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopicConfig;
+import org.apache.kafka.common.requests.CreateTopicsRequest;
 
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Objects;
+import java.util.Optional;
 
 /**
- * A new topic to be created via {@link AdminClient#createTopics(Collection)}.
+ * A new topic to be created via {@link Admin#createTopics(Collection)}.
  */
+@InterfaceAudience.Public
 public class NewTopic {
+
     private final String name;
-    private final int numPartitions;
-    private final short replicationFactor;
+    private final Optional<Integer> numPartitions;
+    private final Optional<Short> replicationFactor;
     private final Map<Integer, List<Integer>> replicasAssignments;
     private Map<String, String> configs = null;
 
@@ -38,6 +47,15 @@ public class NewTopic {
      * A new topic with the specified replication factor and number of partitions.
      */
     public NewTopic(String name, int numPartitions, short replicationFactor) {
+        this(name, Optional.of(numPartitions), Optional.of(replicationFactor));
+    }
+
+    /**
+     * A new topic that optionally defaults {@code numPartitions} and {@code replicationFactor} to
+     * the broker configurations for {@code num.partitions} and {@code default.replication.factor}
+     * respectively.
+     */
+    public NewTopic(String name, Optional<Integer> numPartitions, Optional<Short> replicationFactor) {
         this.name = name;
         this.numPartitions = numPartitions;
         this.replicationFactor = replicationFactor;
@@ -50,11 +68,12 @@ public class NewTopic {
      * @param name the topic name.
      * @param replicasAssignments a map from partition id to replica ids (i.e. broker ids). Although not enforced, it is
      *                            generally a good idea for all partitions to have the same number of replicas.
+     *                            The first replica will be treated as the preferred leader.
      */
     public NewTopic(String name, Map<Integer, List<Integer>> replicasAssignments) {
         this.name = name;
-        this.numPartitions = -1;
-        this.replicationFactor = -1;
+        this.numPartitions = Optional.empty();
+        this.replicationFactor = Optional.empty();
         this.replicasAssignments = Collections.unmodifiableMap(replicasAssignments);
     }
 
@@ -69,14 +88,14 @@ public class NewTopic {
      * The number of partitions for the new topic or -1 if a replica assignment has been specified.
      */
     public int numPartitions() {
-        return numPartitions;
+        return numPartitions.orElse(CreateTopicsRequest.NO_NUM_PARTITIONS);
     }
 
     /**
      * The replication factor for the new topic or -1 if a replica assignment has been specified.
      */
     public short replicationFactor() {
-        return replicationFactor;
+        return replicationFactor.orElse(CreateTopicsRequest.NO_REPLICATION_FACTOR);
     }
 
     /**
@@ -105,31 +124,54 @@ public class NewTopic {
         return configs;
     }
 
-    TopicDetails convertToTopicDetails() {
+    CreatableTopic convertToCreatableTopic() {
+        CreatableTopic creatableTopic = new CreatableTopic().
+            setName(name).
+            setNumPartitions(numPartitions.orElse(CreateTopicsRequest.NO_NUM_PARTITIONS)).
+            setReplicationFactor(replicationFactor.orElse(CreateTopicsRequest.NO_REPLICATION_FACTOR));
         if (replicasAssignments != null) {
-            if (configs != null) {
-                return new TopicDetails(replicasAssignments, configs);
-            } else {
-                return new TopicDetails(replicasAssignments);
-            }
-        } else {
-            if (configs != null) {
-                return new TopicDetails(numPartitions, replicationFactor, configs);
-            } else {
-                return new TopicDetails(numPartitions, replicationFactor);
+            for (Entry<Integer, List<Integer>> entry : replicasAssignments.entrySet()) {
+                creatableTopic.assignments().add(
+                    new CreatableReplicaAssignment().
+                        setPartitionIndex(entry.getKey()).
+                        setBrokerIds(entry.getValue()));
             }
         }
+        if (configs != null) {
+            for (Entry<String, String> entry : configs.entrySet()) {
+                creatableTopic.configs().add(
+                    new CreatableTopicConfig().
+                        setName(entry.getKey()).
+                        setValue(entry.getValue()));
+            }
+        }
+        return creatableTopic;
     }
 
     @Override
     public String toString() {
-        StringBuilder bld = new StringBuilder();
-        bld.append("(name=").append(name).
-                append(", numPartitions=").append(numPartitions).
-                append(", replicationFactor=").append(replicationFactor).
-                append(", replicasAssignments=").append(replicasAssignments).
-                append(", configs=").append(configs).
-                append(")");
-        return bld.toString();
+        return "(name=" + name +
+                ", numPartitions=" + numPartitions.map(String::valueOf).orElse("default") +
+                ", replicationFactor=" + replicationFactor.map(String::valueOf).orElse("default") +
+                ", replicasAssignments=" + replicasAssignments +
+                ", configs=" + configs +
+                ")";
+    }
+
+    @Override
+    public boolean equals(final Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        final NewTopic that = (NewTopic) o;
+        return Objects.equals(name, that.name) &&
+            Objects.equals(numPartitions, that.numPartitions) &&
+            Objects.equals(replicationFactor, that.replicationFactor) &&
+            Objects.equals(replicasAssignments, that.replicasAssignments) &&
+            Objects.equals(configs, that.configs);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, numPartitions, replicationFactor, replicasAssignments, configs);
     }
 }

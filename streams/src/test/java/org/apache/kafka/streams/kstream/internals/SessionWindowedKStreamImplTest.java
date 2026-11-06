@@ -21,243 +21,438 @@ import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.KeyValueTimestamp;
 import org.apache.kafka.streams.StreamsBuilder;
+import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.streams.TopologyTestDriver;
+import org.apache.kafka.streams.TopologyTestDriverBuilder;
 import org.apache.kafka.streams.kstream.Consumed;
-import org.apache.kafka.streams.kstream.ForeachAction;
+import org.apache.kafka.streams.kstream.EmitStrategy;
+import org.apache.kafka.streams.kstream.Grouped;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.Merger;
-import org.apache.kafka.streams.kstream.Serialized;
+import org.apache.kafka.streams.kstream.Named;
 import org.apache.kafka.streams.kstream.SessionWindowedKStream;
 import org.apache.kafka.streams.kstream.SessionWindows;
 import org.apache.kafka.streams.kstream.Windowed;
+import org.apache.kafka.streams.processor.StateStore;
+import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.SessionStore;
-import org.apache.kafka.streams.test.ConsumerRecordFactory;
+import org.apache.kafka.streams.state.internals.ChangeLoggingSessionBytesStore;
+import org.apache.kafka.streams.state.internals.ChangeLoggingSessionBytesStoreWithHeaders;
+import org.apache.kafka.streams.state.internals.MeteredSessionStore;
+import org.apache.kafka.streams.state.internals.WrappedStateStore;
 import org.apache.kafka.test.MockAggregator;
+import org.apache.kafka.test.MockApiProcessorSupplier;
 import org.apache.kafka.test.MockInitializer;
 import org.apache.kafka.test.MockReducer;
 import org.apache.kafka.test.StreamsTestUtils;
-import org.junit.Before;
-import org.junit.Test;
 
-import java.util.Arrays;
-import java.util.HashMap;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.Properties;
+import java.util.stream.Stream;
 
-import static org.hamcrest.CoreMatchers.equalTo;
-import static org.hamcrest.MatcherAssert.assertThat;
+import static java.time.Duration.ofMillis;
+import static java.util.Arrays.asList;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class SessionWindowedKStreamImplTest {
-
     private static final String TOPIC = "input";
     private final StreamsBuilder builder = new StreamsBuilder();
-    private final ConsumerRecordFactory<String, String> recordFactory = new ConsumerRecordFactory<>(new StringSerializer(), new StringSerializer());
-    private final Properties props = StreamsTestUtils.topologyTestConfig(Serdes.String(), Serdes.String());
+    private final Properties props = StreamsTestUtils.getStreamsConfig(Serdes.String(), Serdes.String());
+    private final Merger<String, String> sessionMerger = (aggKey, aggOne, aggTwo) -> aggOne + "+" + aggTwo;
 
-    private final Merger<String, String> sessionMerger = new Merger<String, String>() {
-        @Override
-        public String apply(final String aggKey, final String aggOne, final String aggTwo) {
-            return aggOne + "+" + aggTwo;
-        }
-    };
     private SessionWindowedKStream<String, String> stream;
 
-    @Before
-    public void before() {
+    public EmitStrategy.StrategyType type;
+
+    private boolean emitFinal;
+
+    static Stream<Arguments> emitStrategyAndHeaders() {
+        return Stream.of(
+            Arguments.of(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false),
+            Arguments.of(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, true),
+            Arguments.of(EmitStrategy.StrategyType.ON_WINDOW_CLOSE, false),
+            Arguments.of(EmitStrategy.StrategyType.ON_WINDOW_CLOSE, true)
+        );
+    }
+
+    public void setup(final EmitStrategy.StrategyType inputType, final boolean withHeaders) {
+        type = inputType;
+        final EmitStrategy emitStrategy = EmitStrategy.StrategyType.forType(type);
+        emitFinal = type.equals(EmitStrategy.StrategyType.ON_WINDOW_CLOSE);
+        StreamsTestUtils.maybeSetDslStoreFormatHeaders(props, withHeaders);
+
         final KStream<String, String> stream = builder.stream(TOPIC, Consumed.with(Serdes.String(), Serdes.String()));
-        this.stream = stream.groupByKey(Serialized.with(Serdes.String(), Serdes.String()))
-                .windowedBy(SessionWindows.with(500));
+        this.stream = stream.groupByKey(Grouped.with(Serdes.String(), Serdes.String()))
+            .windowedBy(SessionWindows.ofInactivityGapWithNoGrace(ofMillis(500)))
+            .emitStrategy(emitStrategy);
     }
 
-    @Test
-    public void shouldCountSessionWindowed() {
-        final Map<Windowed<String>, Long> results = new HashMap<>();
+    @ParameterizedTest
+    @MethodSource("emitStrategyAndHeaders")
+    public void shouldCountSessionWindowedWithCachingDisabled(final EmitStrategy.StrategyType inputType, final boolean withHeaders) {
+        setup(inputType, withHeaders);
+        props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, 0);
+        shouldCountSessionWindowed();
+    }
+
+    @ParameterizedTest
+    @MethodSource("emitStrategyAndHeaders")
+    public void shouldCountSessionWindowedWithCachingEnabled(final EmitStrategy.StrategyType inputType, final boolean withHeaders) {
+        setup(inputType, withHeaders);
+        shouldCountSessionWindowed();
+    }
+
+    private void shouldCountSessionWindowed() {
+        final MockApiProcessorSupplier<Windowed<String>, Long, Void, Void> supplier = new MockApiProcessorSupplier<>();
         stream.count()
-                .toStream()
-                .foreach(new ForeachAction<Windowed<String>, Long>() {
-                    @Override
-                    public void apply(final Windowed<String> key, final Long value) {
-                        results.put(key, value);
-                    }
-                });
+            .toStream()
+            .process(supplier);
 
-        try (final TopologyTestDriver driver = new TopologyTestDriver(builder.build(), props, 0L)) {
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
             processData(driver);
         }
-        assertThat(results.get(new Windowed<>("1", new SessionWindow(10, 15))), equalTo(2L));
-        assertThat(results.get(new Windowed<>("2", new SessionWindow(600, 600))), equalTo(1L));
-        assertThat(results.get(new Windowed<>("1", new SessionWindow(600, 600))), equalTo(1L));
+
+        final ArrayList<KeyValueTimestamp<Windowed<String>, Long>> processed =
+            supplier.theCapturedProcessor().processed();
+
+        if (emitFinal) {
+            assertEquals(
+                Collections.singletonList(
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 15L)), 2L, 15L)
+                ),
+                processed
+            );
+        } else {
+            assertEquals(
+                asList(
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 10L)), 1L, 10L),
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 10L)), null, 10L),
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 15L)), 2L, 15L),
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(600L, 600L)), 1L, 600L),
+                    new KeyValueTimestamp<>(new Windowed<>("2", new SessionWindow(600L, 600L)), 1L, 600L),
+                    new KeyValueTimestamp<>(new Windowed<>("2", new SessionWindow(600L, 600L)), null, 600L),
+                    new KeyValueTimestamp<>(new Windowed<>("2", new SessionWindow(599L, 600L)), 2L, 600L)
+                ),
+                processed
+            );
+        }
     }
 
-    @Test
-    public void shouldReduceWindowed() {
-        final Map<Windowed<String>, String> results = new HashMap<>();
+    @ParameterizedTest
+    @MethodSource("emitStrategyAndHeaders")
+    public void shouldReduceWindowed(final EmitStrategy.StrategyType inputType, final boolean withHeaders) {
+        setup(inputType, withHeaders);
+        final MockApiProcessorSupplier<Windowed<String>, String, Void, Void> supplier = new MockApiProcessorSupplier<>();
         stream.reduce(MockReducer.STRING_ADDER)
-                .toStream()
-                .foreach(new ForeachAction<Windowed<String>, String>() {
-                    @Override
-                    public void apply(final Windowed<String> key, final String value) {
-                        results.put(key, value);
-                    }
-                });
+            .toStream()
+            .process(supplier);
 
-        try (final TopologyTestDriver driver = new TopologyTestDriver(builder.build(), props, 0L)) {
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
             processData(driver);
         }
-        assertThat(results.get(new Windowed<>("1", new SessionWindow(10, 15))), equalTo("1+2"));
-        assertThat(results.get(new Windowed<>("2", new SessionWindow(600, 600))), equalTo("1"));
-        assertThat(results.get(new Windowed<>("1", new SessionWindow(600, 600))), equalTo("3"));
+
+        final ArrayList<KeyValueTimestamp<Windowed<String>, String>> processed =
+                supplier.theCapturedProcessor().processed();
+
+        if (emitFinal) {
+            assertEquals(
+                Collections.singletonList(
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 15L)), "1+2", 15L)
+                ),
+                processed
+            );
+        } else {
+            assertEquals(
+                asList(
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 10L)), "1", 10L),
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 10L)), null, 10L),
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 15L)), "1+2", 15L),
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(600L, 600L)), "3", 600L),
+                    new KeyValueTimestamp<>(new Windowed<>("2", new SessionWindow(600L, 600L)), "1", 600L),
+                    new KeyValueTimestamp<>(new Windowed<>("2", new SessionWindow(600L, 600L)), null, 600L),
+                    new KeyValueTimestamp<>(new Windowed<>("2", new SessionWindow(599L, 600L)), "1+2", 600L)
+                ),
+                processed
+            );
+        }
     }
 
-    @Test
-    public void shouldAggregateSessionWindowed() {
-        final Map<Windowed<String>, String> results = new HashMap<>();
+    @ParameterizedTest
+    @MethodSource("emitStrategyAndHeaders")
+    public void shouldAggregateSessionWindowed(final EmitStrategy.StrategyType inputType, final boolean withHeaders) {
+        setup(inputType, withHeaders);
+        final MockApiProcessorSupplier<Windowed<String>, String, Void, Void> supplier = new MockApiProcessorSupplier<>();
         stream.aggregate(MockInitializer.STRING_INIT,
                          MockAggregator.TOSTRING_ADDER,
                          sessionMerger,
-                         Materialized.<String, String, SessionStore<Bytes, byte[]>>with(Serdes.String(), Serdes.String()))
-                .toStream()
-                .foreach(new ForeachAction<Windowed<String>, String>() {
-                    @Override
-                    public void apply(final Windowed<String> key, final String value) {
-                        results.put(key, value);
-                    }
-                });
-        try (final TopologyTestDriver driver = new TopologyTestDriver(builder.build(), props, 0L)) {
+                         Materialized.with(Serdes.String(), Serdes.String()))
+            .toStream()
+            .process(supplier);
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
             processData(driver);
         }
-        assertThat(results.get(new Windowed<>("1", new SessionWindow(10, 15))), equalTo("0+0+1+2"));
-        assertThat(results.get(new Windowed<>("2", new SessionWindow(600, 600))), equalTo("0+1"));
-        assertThat(results.get(new Windowed<>("1", new SessionWindow(600, 600))), equalTo("0+3"));
+
+        final ArrayList<KeyValueTimestamp<Windowed<String>, String>> processed =
+                supplier.theCapturedProcessor().processed();
+
+        if (emitFinal) {
+            assertEquals(
+                Collections.singletonList(
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 15L)), "0+0+1+2", 15L)
+                ),
+                processed
+            );
+        } else {
+            assertEquals(
+                asList(
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 10L)), "0+1", 10L),
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 10L)), null, 10L),
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(10L, 15L)), "0+0+1+2", 15L),
+                    new KeyValueTimestamp<>(new Windowed<>("1", new SessionWindow(600L, 600L)), "0+3", 600L),
+                    new KeyValueTimestamp<>(new Windowed<>("2", new SessionWindow(600L, 600L)), "0+1", 600L),
+                    new KeyValueTimestamp<>(new Windowed<>("2", new SessionWindow(600L, 600L)), null, 600L),
+                    new KeyValueTimestamp<>(new Windowed<>("2", new SessionWindow(599L, 600L)), "0+0+1+2", 600L)
+                ),
+                processed
+            );
+        }
     }
 
-    @Test
-    public void shouldMaterializeCount() {
-        stream.count(Materialized.<String, Long, SessionStore<Bytes, byte[]>>as("count-store"));
+    @ParameterizedTest
+    @MethodSource("emitStrategyAndHeaders")
+    public void shouldMaterializeCount(final EmitStrategy.StrategyType inputType, final boolean withHeaders) {
+        setup(inputType, withHeaders);
+        stream.count(Materialized.as("count-store"));
 
-        try (final TopologyTestDriver driver = new TopologyTestDriver(builder.build(), props, 0L)) {
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
             processData(driver);
             final SessionStore<String, Long> store = driver.getSessionStore("count-store");
-            final List<KeyValue<Windowed<String>, Long>> data = StreamsTestUtils.toList(store.fetch("1", "2"));
-            assertThat(data, equalTo(Arrays.asList(
-                    KeyValue.pair(new Windowed<>("1", new SessionWindow(10, 15)), 2L),
-                    KeyValue.pair(new Windowed<>("1", new SessionWindow(600, 600)), 1L),
-                    KeyValue.pair(new Windowed<>("2", new SessionWindow(600, 600)), 1L))));
+            final List<KeyValue<Windowed<String>, Long>> data = unwrapAggregations(store.fetch("1", "2"));
+            if (!emitFinal) {
+                assertEquals(
+                        List.of(
+                                KeyValue.pair(new Windowed<>("1", new SessionWindow(10, 15)), 2L),
+                                KeyValue.pair(new Windowed<>("1", new SessionWindow(600, 600)), 1L),
+                                KeyValue.pair(new Windowed<>("2", new SessionWindow(599, 600)), 2L)),
+                        data);
+            } else {
+                assertEquals(
+                        List.of(
+                                KeyValue.pair(new Windowed<>("1", new SessionWindow(600, 600)), 1L),
+                                KeyValue.pair(new Windowed<>("2", new SessionWindow(599, 600)), 2L)),
+                        data);
+
+            }
         }
     }
 
-    @Test
-    public void shouldMaterializeReduced() {
-        stream.reduce(MockReducer.STRING_ADDER, Materialized.<String, String, SessionStore<Bytes, byte[]>>as("reduced"));
+    @ParameterizedTest
+    @MethodSource("emitStrategyAndHeaders")
+    public void shouldMaterializeReduced(final EmitStrategy.StrategyType inputType, final boolean withHeaders) {
+        setup(inputType, withHeaders);
+        stream.reduce(MockReducer.STRING_ADDER, Materialized.as("reduced"));
 
-        try (final TopologyTestDriver driver = new TopologyTestDriver(builder.build(), props, 0L)) {
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
             processData(driver);
             final SessionStore<String, String> sessionStore = driver.getSessionStore("reduced");
-            final List<KeyValue<Windowed<String>, String>> data = StreamsTestUtils.toList(sessionStore.fetch("1", "2"));
+            final List<KeyValue<Windowed<String>, String>> data = unwrapAggregations(sessionStore.fetch("1", "2"));
 
-            assertThat(data, equalTo(Arrays.asList(
-                    KeyValue.pair(new Windowed<>("1", new SessionWindow(10, 15)), "1+2"),
-                    KeyValue.pair(new Windowed<>("1", new SessionWindow(600, 600)), "3"),
-                    KeyValue.pair(new Windowed<>("2", new SessionWindow(600, 600)), "1"))));
+            if (!emitFinal) {
+                assertEquals(
+                        List.of(
+                                KeyValue.pair(new Windowed<>("1", new SessionWindow(10, 15)), "1+2"),
+                                KeyValue.pair(new Windowed<>("1", new SessionWindow(600, 600)), "3"),
+                                KeyValue.pair(new Windowed<>("2", new SessionWindow(599, 600)), "1+2")),
+                        data);
+            } else {
+                assertEquals(
+                        List.of(
+                                KeyValue.pair(new Windowed<>("1", new SessionWindow(600, 600)), "3"),
+                                KeyValue.pair(new Windowed<>("2", new SessionWindow(599, 600)), "1+2")),
+                        data);
+
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("emitStrategyAndHeaders")
+    public void shouldMaterializeAggregated(final EmitStrategy.StrategyType inputType, final boolean withHeaders) {
+        setup(inputType, withHeaders);
+        stream.aggregate(
+            MockInitializer.STRING_INIT,
+            MockAggregator.TOSTRING_ADDER,
+            sessionMerger,
+            Materialized.<String, String, SessionStore<Bytes, byte[]>>as("aggregated").withValueSerde(Serdes.String()));
+
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
+            processData(driver);
+            final SessionStore<String, String> sessionStore = driver.getSessionStore("aggregated");
+            final List<KeyValue<Windowed<String>, String>> data = unwrapAggregations(sessionStore.fetch("1", "2"));
+            if (!emitFinal) {
+                assertEquals(
+                        List.of(
+                                KeyValue.pair(new Windowed<>("1", new SessionWindow(10, 15)), "0+0+1+2"),
+                                KeyValue.pair(new Windowed<>("1", new SessionWindow(600, 600)), "0+3"),
+                                KeyValue.pair(new Windowed<>("2", new SessionWindow(599, 600)), "0+0+1+2")),
+                        data);
+            } else {
+                assertEquals(
+                        List.of(
+                                KeyValue.pair(new Windowed<>("1", new SessionWindow(600, 600)), "0+3"),
+                                KeyValue.pair(new Windowed<>("2", new SessionWindow(599, 600)), "0+0+1+2")),
+                        data);
+
+            }
         }
     }
 
     @Test
-    public void shouldMaterializeAggregated() {
-        stream.aggregate(MockInitializer.STRING_INIT,
-                         MockAggregator.TOSTRING_ADDER,
-                         sessionMerger,
-                         Materialized.<String, String, SessionStore<Bytes, byte[]>>as("aggregated").withValueSerde(Serdes.String()));
-
-        try (final TopologyTestDriver driver = new TopologyTestDriver(builder.build(), props, 0L)) {
-            processData(driver);
-            final SessionStore<String, String> sessionStore = driver.getSessionStore("aggregated");
-            final List<KeyValue<Windowed<String>, String>> data = StreamsTestUtils.toList(sessionStore.fetch("1", "2"));
-            assertThat(data, equalTo(Arrays.asList(
-                    KeyValue.pair(new Windowed<>("1", new SessionWindow(10, 15)), "0+0+1+2"),
-                    KeyValue.pair(new Windowed<>("1", new SessionWindow(600, 600)), "0+3"),
-                    KeyValue.pair(new Windowed<>("2", new SessionWindow(600, 600)), "0+1"))));
-        }
-    }
-
-    @Test(expected = NullPointerException.class)
     public void shouldThrowNullPointerOnAggregateIfInitializerIsNull() {
-        stream.aggregate(null, MockAggregator.TOSTRING_ADDER, sessionMerger);
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.aggregate(null, MockAggregator.TOSTRING_ADDER, sessionMerger));
     }
 
-    @Test(expected = NullPointerException.class)
+    @Test
     public void shouldThrowNullPointerOnAggregateIfAggregatorIsNull() {
-        stream.aggregate(MockInitializer.STRING_INIT, null, sessionMerger);
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.aggregate(MockInitializer.STRING_INIT, null, sessionMerger));
     }
 
-    @Test(expected = NullPointerException.class)
+    @Test
     public void shouldThrowNullPointerOnAggregateIfMergerIsNull() {
-        stream.aggregate(MockInitializer.STRING_INIT, MockAggregator.TOSTRING_ADDER, null);
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.aggregate(MockInitializer.STRING_INIT, MockAggregator.TOSTRING_ADDER, null));
     }
 
-    @Test(expected = NullPointerException.class)
+    @Test
     public void shouldThrowNullPointerOnReduceIfReducerIsNull() {
-        stream.reduce(null);
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.reduce(null));
     }
 
-    @Test(expected = NullPointerException.class)
+    @Test
     public void shouldThrowNullPointerOnMaterializedAggregateIfInitializerIsNull() {
-        stream.aggregate(null,
-                         MockAggregator.TOSTRING_ADDER,
-                         sessionMerger,
-                         Materialized.<String, String, SessionStore<Bytes, byte[]>>as("store"));
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.aggregate(
+            null,
+            MockAggregator.TOSTRING_ADDER,
+            sessionMerger,
+            Materialized.as("store")));
     }
 
-    @Test(expected = NullPointerException.class)
+    @Test
     public void shouldThrowNullPointerOnMaterializedAggregateIfAggregatorIsNull() {
-        stream.aggregate(MockInitializer.STRING_INIT,
-                         null,
-                         sessionMerger,
-                         Materialized.<String, String, SessionStore<Bytes, byte[]>>as("store"));
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.aggregate(
+            MockInitializer.STRING_INIT,
+            null,
+            sessionMerger,
+            Materialized.as("store")));
     }
 
-    @Test(expected = NullPointerException.class)
+    @Test
     public void shouldThrowNullPointerOnMaterializedAggregateIfMergerIsNull() {
-        stream.aggregate(MockInitializer.STRING_INIT,
-                         MockAggregator.TOSTRING_ADDER,
-                         null,
-                         Materialized.<String, String, SessionStore<Bytes, byte[]>>as("store"));
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.aggregate(
+            MockInitializer.STRING_INIT,
+            MockAggregator.TOSTRING_ADDER,
+            null,
+            Materialized.as("store")));
     }
 
-    @SuppressWarnings("unchecked")
-    @Test(expected = NullPointerException.class)
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    @Test
     public void shouldThrowNullPointerOnMaterializedAggregateIfMaterializedIsNull() {
-        stream.aggregate(MockInitializer.STRING_INIT,
-                         MockAggregator.TOSTRING_ADDER,
-                         sessionMerger,
-                         (Materialized) null);
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.aggregate(
+            MockInitializer.STRING_INIT,
+            MockAggregator.TOSTRING_ADDER,
+            sessionMerger,
+            (Materialized) null));
     }
 
-    @Test(expected = NullPointerException.class)
+    @Test
     public void shouldThrowNullPointerOnMaterializedReduceIfReducerIsNull() {
-        stream.reduce(null,
-                      Materialized.<String, String, SessionStore<Bytes, byte[]>>as("store"));
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.reduce(null, Materialized.as("store")));
     }
 
-    @Test(expected = NullPointerException.class)
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    @Test
     public void shouldThrowNullPointerOnMaterializedReduceIfMaterializedIsNull() {
-        stream.reduce(MockReducer.STRING_ADDER,
-                      null);
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.reduce(MockReducer.STRING_ADDER, (Materialized) null));
     }
 
-    @Test(expected = NullPointerException.class)
+    @Test
+    public void shouldThrowNullPointerOnMaterializedReduceIfNamedIsNull() {
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.reduce(MockReducer.STRING_ADDER, (Named) null));
+    }
+
+    @Test
     public void shouldThrowNullPointerOnCountIfMaterializedIsNull() {
-        stream.count(null);
+        setup(EmitStrategy.StrategyType.ON_WINDOW_UPDATE, false);
+        assertThrows(NullPointerException.class, () -> stream.count((Materialized<String, Long, SessionStore<Bytes, byte[]>>) null));
+    }
+
+    @ParameterizedTest
+    @MethodSource("emitStrategyAndHeaders")
+    public void shouldNotEnableCachingWithEmitFinal(final EmitStrategy.StrategyType inputType, final boolean withHeaders) {
+        setup(inputType, withHeaders);
+        if (!emitFinal)
+            return;
+
+        stream.aggregate(
+                MockInitializer.STRING_INIT,
+                MockAggregator.TOSTRING_ADDER,
+                sessionMerger,
+                Materialized.<String, String, SessionStore<Bytes, byte[]>>as("aggregated").withValueSerde(Serdes.String()));
+
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
+            final StateStore store = driver.getAllStateStores().get("aggregated");
+            final WrappedStateStore<?, ?, ?> changeLogging = (WrappedStateStore<?, ?, ?>) ((WrappedStateStore<?, ?, ?>) store).wrapped();
+            assertInstanceOf(MeteredSessionStore.class, store);
+            if (withHeaders) {
+                assertInstanceOf(ChangeLoggingSessionBytesStoreWithHeaders.class, changeLogging);
+            } else {
+                assertInstanceOf(ChangeLoggingSessionBytesStore.class, changeLogging);
+            }
+        }
     }
 
     private void processData(final TopologyTestDriver driver) {
-        driver.pipeInput(recordFactory.create(TOPIC, "1", "1", 10));
-        driver.pipeInput(recordFactory.create(TOPIC, "1", "2", 15));
-        driver.pipeInput(recordFactory.create(TOPIC, "1", "3", 600));
-        driver.pipeInput(recordFactory.create(TOPIC, "2", "1", 600));
+        final TestInputTopic<String, String> inputTopic =
+                driver.createInputTopic(TOPIC, new StringSerializer(), new StringSerializer());
+        inputTopic.pipeInput("1", "1", 10);
+        inputTopic.pipeInput("1", "2", 15);
+        inputTopic.pipeInput("1", "3", 600);
+        inputTopic.pipeInput("2", "1", 600);
+        inputTopic.pipeInput("2", "2", 599);
     }
 
+    private <V> List<KeyValue<Windowed<String>, V>> unwrapAggregations(
+            final KeyValueIterator<Windowed<String>, V> iterator) {
+        final List<KeyValue<Windowed<String>, V>> result = new ArrayList<>();
+        while (iterator.hasNext()) {
+            final KeyValue<Windowed<String>, V> next = iterator.next();
+            result.add(KeyValue.pair(next.key, next.value));
+        }
+        iterator.close();
+        return result;
+    }
 }

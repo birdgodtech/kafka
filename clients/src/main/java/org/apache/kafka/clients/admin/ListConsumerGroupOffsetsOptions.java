@@ -17,37 +17,26 @@
 
 package org.apache.kafka.clients.admin;
 
-import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.annotation.InterfaceStability;
-
-import java.util.List;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 /**
- * Options for {@link AdminClient#listConsumerGroupOffsets(String)}.
+ * Options for {@link Admin#listConsumerGroupOffsets(java.util.Map)} and {@link Admin#listConsumerGroupOffsets(String)}.
  * <p>
- * The API of this class is evolving, see {@link AdminClient} for details.
  */
-@InterfaceStability.Evolving
+@InterfaceAudience.Public
 public class ListConsumerGroupOffsetsOptions extends AbstractOptions<ListConsumerGroupOffsetsOptions> {
 
-    private List<TopicPartition> topicPartitions = null;
+    private boolean requireStable = false;
 
     /**
-     * Set the topic partitions to list as part of the result.
-     * {@code null} includes all topic partitions.
-     *
-     * @param topicPartitions List of topic partitions to include
-     * @return This ListGroupOffsetsOptions
+     * Sets an optional requireStable flag.
      */
-    public ListConsumerGroupOffsetsOptions topicPartitions(List<TopicPartition> topicPartitions) {
-        this.topicPartitions = topicPartitions;
+    public ListConsumerGroupOffsetsOptions requireStable(final boolean requireStable) {
+        this.requireStable = requireStable;
         return this;
     }
 
-    /**
-     * Returns a list of topic partitions to add as part of the result.
-     */
-    public List<TopicPartition> topicPartitions() {
-        return topicPartitions;
+    public boolean requireStable() {
+        return requireStable;
     }
 }

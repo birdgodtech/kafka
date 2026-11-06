@@ -14,8 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.streams.kstream;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 /**
  * The result key type of a windowed stream aggregation.
@@ -29,6 +31,7 @@ package org.apache.kafka.streams.kstream;
  * @see KGroupedStream#windowedBy(Windows)
  * @see KGroupedStream#windowedBy(SessionWindows)
  */
+@InterfaceAudience.Public
 public class Windowed<K> {
 
     private final K key;
@@ -65,12 +68,12 @@ public class Windowed<K> {
 
     @Override
     public boolean equals(final Object obj) {
-        if (obj == this)
+        if (obj == this) {
             return true;
-
-        if (!(obj instanceof Windowed))
+        }
+        if (!(obj instanceof Windowed)) {
             return false;
-
+        }
         final Windowed<?> that = (Windowed) obj;
         return window.equals(that.window) && key.equals(that.key);
     }

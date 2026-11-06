@@ -16,24 +16,27 @@
  */
 package org.apache.kafka.connect.storage;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
 import org.apache.kafka.common.config.ConfigDef.Width;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
  * Configuration options for {@link StringConverter} instances.
  */
+@InterfaceAudience.Public
 public class StringConverterConfig extends ConverterConfig {
 
     public static final String ENCODING_CONFIG = "converter.encoding";
-    public static final String ENCODING_DEFAULT = "UTF8";
+    public static final String ENCODING_DEFAULT = StandardCharsets.UTF_8.name();
     private static final String ENCODING_DOC = "The name of the Java character set to use for encoding strings as byte arrays.";
     private static final String ENCODING_DISPLAY = "Encoding";
 
-    private final static ConfigDef CONFIG;
+    private static final ConfigDef CONFIG;
 
     static {
         CONFIG = ConverterConfig.newConfigDef();

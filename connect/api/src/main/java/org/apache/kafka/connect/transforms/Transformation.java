@@ -17,30 +17,56 @@
 package org.apache.kafka.connect.transforms;
 
 import org.apache.kafka.common.Configurable;
-import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.annotation.InterfaceAudience;
+import org.apache.kafka.connect.components.ConnectPlugin;
 import org.apache.kafka.connect.connector.ConnectRecord;
 
 import java.io.Closeable;
 
 /**
  * Single message transformation for Kafka Connect record types.
- *
+ * <p>
  * Connectors can be configured with transformations to make lightweight message-at-a-time modifications.
+ * <p>Kafka Connect may discover implementations of this interface using the Java {@link java.util.ServiceLoader} mechanism.
+ * To support this, implementations of this interface should also contain a service provider configuration file in
+ * {@code META-INF/services/org.apache.kafka.connect.transforms.Transformation}.
+ *
+ * <p>Implement {@link org.apache.kafka.common.metrics.Monitorable} to enable the transformation to register metrics.
+ * The following tags are automatically added to all metrics registered: <code>connector</code> set to connector name,
+ * <code>task</code> set to the task id and <code>transformation</code> set to the transformation alias.
+ *
+ * @param <R> The type of record (must be an implementation of {@link ConnectRecord})
  */
-public interface Transformation<R extends ConnectRecord<R>> extends Configurable, Closeable {
+@InterfaceAudience.Public
+public interface Transformation<R extends ConnectRecord<R>> extends Configurable, Closeable, ConnectPlugin {
 
     /**
-     * Apply transformation to the {@code record} and return another record object (which may be {@code record} itself) or {@code null},
-     * corresponding to a map or filter operation respectively.
-     *
+     * Apply transformation to the {@code record} and return another record object (which may be {@code record} itself)
+     * or {@code null}, corresponding to a map or filter operation respectively.
+     * <p>
+     * A transformation must not mutate objects reachable from the given {@code record}
+     * (including, but not limited to, {@link org.apache.kafka.connect.header.Headers Headers},
+     * {@link org.apache.kafka.connect.data.Struct Structs}, {@code Lists}, and {@code Maps}).
+     * If such objects need to be changed, a new {@link ConnectRecord} should be created and returned.
+     * <p>
      * The implementation must be thread-safe.
+     *
+     * @param record the record to be transformed; may not be null
+     * @return the transformed record; may be null to indicate that the record should be dropped
      */
     R apply(R record);
 
-    /** Configuration specification for this transformation. **/
-    ConfigDef config();
+    /**
+     * Get the version of this component.
+     *
+     * @return the version, formatted as a String. The version may not be {@code null} or empty.
+     */
+    @Override
+    default String version() {
+        return "undefined";
+    }
 
-    /** Signal that this transformation instance will no longer will be used. **/
+    /** Signal that this transformation instance will no longer will be used. */
     @Override
     void close();
 

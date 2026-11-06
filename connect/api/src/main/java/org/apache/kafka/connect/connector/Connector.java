@@ -16,11 +16,12 @@
  */
 package org.apache.kafka.connect.connector;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.config.Config;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigValue;
+import org.apache.kafka.connect.components.ConnectPlugin;
 import org.apache.kafka.connect.errors.ConnectException;
-import org.apache.kafka.connect.components.Versioned;
 
 import java.util.List;
 import java.util.Map;
@@ -29,20 +30,22 @@ import java.util.Map;
  * <p>
  * Connectors manage integration of Kafka Connect with another system, either as an input that ingests
  * data into Kafka or an output that passes data to an external system. Implementations should
- * not use this class directly; they should inherit from SourceConnector or SinkConnector.
+ * not use this class directly; they should inherit from {@link org.apache.kafka.connect.source.SourceConnector SourceConnector}
+ * or {@link org.apache.kafka.connect.sink.SinkConnector SinkConnector}.
  * </p>
  * <p>
- * Connectors have two primary tasks. First, given some configuration, they are responsible for
+ * Connectors have two primary roles. First, given some configuration, they are responsible for
  * creating configurations for a set of {@link Task}s that split up the data processing. For
  * example, a database Connector might create Tasks by dividing the set of tables evenly among
  * tasks. Second, they are responsible for monitoring inputs for changes that require
- * reconfiguration and notifying the Kafka Connect runtime via the ConnectorContext. Continuing the
+ * reconfiguration and notifying the Kafka Connect runtime via the {@link ConnectorContext}. Continuing the
  * previous example, the connector might periodically check for new tables and notify Kafka Connect of
  * additions and deletions. Kafka Connect will then request new configurations and update the running
  * Tasks.
  * </p>
  */
-public abstract class Connector implements Versioned {
+@InterfaceAudience.Public
+public abstract class Connector implements ConnectPlugin {
 
     protected ConnectorContext context;
 
@@ -79,6 +82,15 @@ public abstract class Connector implements Versioned {
     }
 
     /**
+     * Returns the context object used to interact with the Kafka Connect runtime.
+     *
+     * @return the context for this Connector.
+     */
+    protected ConnectorContext context() {
+        return context;
+    }
+
+    /**
      * Start this Connector. This method will only be called on a clean Connector, i.e. it has
      * either just been instantiated and initialized or {@link #stop()} has been invoked.
      *
@@ -100,13 +112,13 @@ public abstract class Connector implements Versioned {
     }
 
     /**
-     * Returns the Task implementation for this Connector.
+     * Returns the {@link Task} implementation for this Connector.
      */
     public abstract Class<? extends Task> taskClass();
 
     /**
      * Returns a set of configurations for Tasks based on the current configuration,
-     * producing at most count configurations.
+     * producing at most {@code maxTasks} configurations.
      *
      * @param maxTasks maximum number of configurations to generate
      * @return configurations for Tasks
@@ -121,8 +133,8 @@ public abstract class Connector implements Versioned {
     /**
      * Validate the connector configuration values against configuration definitions.
      * @param connectorConfigs the provided configuration values
-     * @return List of Config, each Config contains the updated configuration information given
-     * the current configuration values.
+     * @return a parsed and validated {@link Config} containing any relevant validation errors with the raw
+     * {@code connectorConfigs} which should prevent this configuration from being used.
      */
     public Config validate(Map<String, String> connectorConfigs) {
         ConfigDef configDef = config();
@@ -139,5 +151,6 @@ public abstract class Connector implements Versioned {
      * Define the configuration for the connector.
      * @return The ConfigDef for this connector; may not be null.
      */
+    @Override
     public abstract ConfigDef config();
 }

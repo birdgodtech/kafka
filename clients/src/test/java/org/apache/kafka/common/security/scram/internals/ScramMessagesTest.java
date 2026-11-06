@@ -16,25 +16,29 @@
  */
 package org.apache.kafka.common.security.scram.internals;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-import java.util.Collections;
-
-import javax.security.sasl.SaslException;
-
 import org.apache.kafka.common.security.scram.internals.ScramMessages.AbstractScramMessage;
 import org.apache.kafka.common.security.scram.internals.ScramMessages.ClientFinalMessage;
 import org.apache.kafka.common.security.scram.internals.ScramMessages.ClientFirstMessage;
 import org.apache.kafka.common.security.scram.internals.ScramMessages.ServerFinalMessage;
 import org.apache.kafka.common.security.scram.internals.ScramMessages.ServerFirstMessage;
 
-import org.junit.Before;
-import org.junit.Test;
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.Locale;
+
+import javax.security.sasl.SaslException;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ScramMessagesTest {
 
@@ -63,7 +67,7 @@ public class ScramMessagesTest {
 
     private ScramFormatter formatter;
 
-    @Before
+    @BeforeEach
     public void setUp() throws Exception {
         formatter  = new ScramFormatter(ScramMechanism.SCRAM_SHA_256);
     }
@@ -71,7 +75,7 @@ public class ScramMessagesTest {
     @Test
     public void validClientFirstMessage() throws SaslException {
         String nonce = formatter.secureRandomString();
-        ClientFirstMessage m = new ClientFirstMessage("someuser", nonce, Collections.<String, String>emptyMap());
+        ClientFirstMessage m = new ClientFirstMessage("someuser", nonce, Collections.emptyMap());
         checkClientFirstMessage(m, "someuser", nonce, "");
 
         // Default format used by Kafka client: only user and nonce are specified
@@ -85,13 +89,13 @@ public class ScramMessagesTest {
         str = String.format("n,,n=test=2Cuser,r=%s", nonce);
         m = createScramMessage(ClientFirstMessage.class, str);
         checkClientFirstMessage(m, "test=2Cuser", nonce, "");
-        assertEquals("test,user", formatter.username(m.saslName()));
+        assertEquals("test,user", ScramFormatter.username(m.saslName()));
 
         // Username containing equals, encoded as =3D
         str = String.format("n,,n=test=3Duser,r=%s", nonce);
         m = createScramMessage(ClientFirstMessage.class, str);
         checkClientFirstMessage(m, "test=3Duser", nonce, "");
-        assertEquals("test=user", formatter.username(m.saslName()));
+        assertEquals("test=user", ScramFormatter.username(m.saslName()));
 
         // Optional authorization id specified
         str = String.format("n,a=testauthzid,n=testuser,r=%s", nonce);
@@ -112,11 +116,11 @@ public class ScramMessagesTest {
         //optional tokenauth specified as extensions
         str = String.format("n,,n=testuser,r=%s,%s", nonce, "tokenauth=true");
         m = createScramMessage(ClientFirstMessage.class, str);
-        assertTrue("Token authentication not set from extensions", m.extensions().tokenAuthenticated());
+        assertTrue(m.extensions().tokenAuthenticated(), "Token authentication not set from extensions");
     }
 
     @Test
-    public void invalidClientFirstMessage() throws SaslException {
+    public void invalidClientFirstMessage() {
         String nonce = formatter.secureRandomString();
         // Invalid entry in gs2-header
         String invalid = String.format("n,x=something,n=testuser,r=%s", nonce);
@@ -166,7 +170,28 @@ public class ScramMessagesTest {
     }
 
     @Test
-    public void invalidServerFirstMessage() throws SaslException {
+    @ResourceLock(Resources.LOCALE)
+    public void serverFirstMessageUsesAsciiDigitsRegardlessOfDefaultLocale() throws SaslException {
+        String clientNonce = formatter.secureRandomString();
+        String serverNonce = formatter.secureRandomString();
+        String nonce = clientNonce + serverNonce;
+        String salt = randomBytesAsString();
+
+        // Under a default locale with native digits (e.g. ar-EG formats %d as Arabic-Indic digits) the
+        // iteration count must still be sent as ASCII digits, otherwise clients cannot parse the message
+        Locale defaultLocale = Locale.getDefault();
+        Locale.setDefault(Locale.forLanguageTag("ar-EG"));
+        try {
+            ServerFirstMessage m = new ServerFirstMessage(clientNonce, serverNonce, toBytes(salt), 4096);
+            assertEquals(String.format(Locale.ROOT, "r=%s,s=%s,i=4096", nonce, salt), new String(m.toBytes(), StandardCharsets.UTF_8));
+            checkServerFirstMessage(new ServerFirstMessage(m.toBytes()), nonce, salt, 4096);
+        } finally {
+            Locale.setDefault(defaultLocale);
+        }
+    }
+
+    @Test
+    public void invalidServerFirstMessage() {
         String nonce = formatter.secureRandomString();
         String salt = randomBytesAsString();
 
@@ -202,7 +227,7 @@ public class ScramMessagesTest {
         String proof = randomBytesAsString();
 
         ClientFinalMessage m = new ClientFinalMessage(toBytes(channelBinding), nonce);
-        assertNull("Invalid proof", m.proof());
+        assertNull(m.proof(), "Invalid proof");
         m.proof(toBytes(proof));
         checkClientFinalMessage(m, channelBinding, nonce, proof);
 
@@ -221,7 +246,7 @@ public class ScramMessagesTest {
     }
 
     @Test
-    public void invalidClientFinalMessage() throws SaslException {
+    public void invalidClientFinalMessage() {
         String nonce = formatter.secureRandomString();
         String channelBinding = randomBytesAsString();
         String proof = randomBytesAsString();
@@ -272,7 +297,7 @@ public class ScramMessagesTest {
     }
 
     @Test
-    public void invalidServerFinalMessage() throws SaslException {
+    public void invalidServerFinalMessage() {
         String serverSignature = randomBytesAsString();
 
         // Invalid error
@@ -280,7 +305,7 @@ public class ScramMessagesTest {
         checkInvalidScramMessage(ServerFinalMessage.class, invalid);
 
         // Invalid server signature
-        invalid = String.format("v=1=23");
+        invalid = "v=1=23";
         checkInvalidScramMessage(ServerFinalMessage.class, invalid);
 
         // Invalid extensions
@@ -299,7 +324,7 @@ public class ScramMessagesTest {
 
     private byte[] toBytes(String base64Str) {
         return Base64.getDecoder().decode(base64Str);
-    };
+    }
 
     private void checkClientFirstMessage(ClientFirstMessage message, String saslName, String nonce, String authzid) {
         assertEquals(saslName, message.saslName());
@@ -322,7 +347,7 @@ public class ScramMessagesTest {
     private void checkServerFinalMessage(ServerFinalMessage message, String error, String serverSignature) {
         assertEquals(error, message.error());
         if (serverSignature == null)
-            assertNull("Unexpected server signature", message.serverSignature());
+            assertNull(message.serverSignature(), "Unexpected server signature");
         else
             assertArrayEquals(Base64.getDecoder().decode(serverSignature), message.serverSignature());
     }
@@ -343,11 +368,6 @@ public class ScramMessagesTest {
     }
 
     private <T extends AbstractScramMessage> void checkInvalidScramMessage(Class<T> clazz, String message) {
-        try {
-            createScramMessage(clazz, message);
-            fail("Exception not throws for invalid message of type " + clazz + " : " + message);
-        } catch (SaslException e) {
-            // Expected exception
-        }
+        assertThrows(SaslException.class, () -> createScramMessage(clazz, message), "Exception not throws for invalid message of type " + clazz + " : " + message);
     }
 }

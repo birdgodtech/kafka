@@ -14,11 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.metrics;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 /**
  * A Stat is a quantity such as average, max, etc that is computed off the stream of updates to a sensor
  */
+@InterfaceAudience.Public
 public interface Stat {
 
     /**
@@ -27,6 +31,6 @@ public interface Stat {
      * @param value The value to record
      * @param timeMs The POSIX time in milliseconds this value occurred
      */
-    public void record(MetricConfig config, double value, long timeMs);
+    void record(MetricConfig config, double value, long timeMs);
 
 }

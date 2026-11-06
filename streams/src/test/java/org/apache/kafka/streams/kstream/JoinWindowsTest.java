@@ -16,122 +16,198 @@
  */
 package org.apache.kafka.streams.kstream;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.fail;
+import java.time.Duration;
 
+import static java.time.Duration.ofMillis;
+import static java.time.Duration.ofSeconds;
+import static org.apache.kafka.streams.EqualityCheck.verifyEquality;
+import static org.apache.kafka.streams.EqualityCheck.verifyInEquality;
+import static org.apache.kafka.streams.kstream.Windows.DEPRECATED_DEFAULT_24_HR_GRACE_PERIOD;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class JoinWindowsTest {
 
-    private static long anySize = 123L;
-    private static long anyOtherSize = 456L; // should be larger than anySize
-
-    @Test
-    public void shouldHaveSaneEqualsAndHashCode() {
-        JoinWindows w1 = JoinWindows.of(anySize);
-        JoinWindows w2 = JoinWindows.of(anySize);
-
-        // Reflexive
-        assertEquals(w1, w1);
-        assertEquals(w1.hashCode(), w1.hashCode());
-
-        // Symmetric
-        assertEquals(w1, w2);
-        assertEquals(w2, w1);
-        assertEquals(w1.hashCode(), w2.hashCode());
-
-        JoinWindows w3 = JoinWindows.of(w2.afterMs).before(anyOtherSize);
-        JoinWindows w4 = JoinWindows.of(anyOtherSize).after(w2.afterMs);
-        assertEquals(w3, w4);
-        assertEquals(w4, w3);
-        assertEquals(w3.hashCode(), w4.hashCode());
-
-        // Inequality scenarios
-        assertNotEquals("must be false for null", null, w1);
-        assertNotEquals("must be false for different window types", UnlimitedWindows.of(), w1);
-        assertNotEquals("must be false for different types", new Object(), w1);
-
-        JoinWindows differentWindowSize = JoinWindows.of(w1.afterMs + 1);
-        assertNotEquals("must be false when window sizes are different", differentWindowSize, w1);
-
-        JoinWindows differentWindowSize2 = JoinWindows.of(w1.afterMs).after(w1.afterMs + 1);
-        assertNotEquals("must be false when window sizes are different", differentWindowSize2, w1);
-
-        JoinWindows differentWindowSize3 = JoinWindows.of(w1.afterMs).before(w1.beforeMs + 1);
-        assertNotEquals("must be false when window sizes are different", differentWindowSize3, w1);
-    }
+    private static final long ANY_SIZE = 123L;
+    private static final long ANY_OTHER_SIZE = 456L; // should be larger than anySize
+    private static final long ANY_GRACE = 1024L;
 
     @Test
     public void validWindows() {
-        JoinWindows.of(anyOtherSize)   // [ -anyOtherSize ; anyOtherSize ]
-            .before(anySize)                    // [ -anySize ; anyOtherSize ]
-            .before(0)                          // [ 0 ; anyOtherSize ]
-            .before(-anySize)                   // [ anySize ; anyOtherSize ]
-            .before(-anyOtherSize);             // [ anyOtherSize ; anyOtherSize ]
+        JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(ANY_OTHER_SIZE))   // [ -anyOtherSize ; anyOtherSize ]
+                   .before(ofMillis(ANY_SIZE))                              // [ -anySize ; anyOtherSize ]
+                   .before(ofMillis(0))                                     // [ 0 ; anyOtherSize ]
+                   .before(ofMillis(-ANY_SIZE))                             // [ anySize ; anyOtherSize ]
+                   .before(ofMillis(-ANY_OTHER_SIZE));                      // [ anyOtherSize ; anyOtherSize ]
 
-        JoinWindows.of(anyOtherSize)   // [ -anyOtherSize ; anyOtherSize ]
-            .after(anySize)                     // [ -anyOtherSize ; anySize ]
-            .after(0)                           // [ -anyOtherSize ; 0 ]
-            .after(-anySize)                    // [ -anyOtherSize ; -anySize ]
-            .after(-anyOtherSize);              // [ -anyOtherSize ; -anyOtherSize ]
+        JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(ANY_OTHER_SIZE))   // [ -anyOtherSize ; anyOtherSize ]
+                   .after(ofMillis(ANY_SIZE))                               // [ -anyOtherSize ; anySize ]
+                   .after(ofMillis(0))                                      // [ -anyOtherSize ; 0 ]
+                   .after(ofMillis(-ANY_SIZE))                              // [ -anyOtherSize ; -anySize ]
+                   .after(ofMillis(-ANY_OTHER_SIZE));                       // [ -anyOtherSize ; -anyOtherSize ]
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
+    public void beforeShouldNotModifyGrace() {
+        final JoinWindows joinWindows = JoinWindows.ofTimeDifferenceAndGrace(ofMillis(ANY_SIZE), ofMillis(ANY_OTHER_SIZE))
+            .before(ofSeconds(ANY_SIZE));
+
+        assertEquals(ANY_OTHER_SIZE, joinWindows.gracePeriodMs());
+    }
+
+    @Test
+    public void afterShouldNotModifyGrace() {
+        final JoinWindows joinWindows = JoinWindows.ofTimeDifferenceAndGrace(ofMillis(ANY_SIZE), ofMillis(ANY_OTHER_SIZE))
+            .after(ofSeconds(ANY_SIZE));
+
+        assertEquals(ANY_OTHER_SIZE, joinWindows.gracePeriodMs());
+    }
+
+    @Test
     public void timeDifferenceMustNotBeNegative() {
-        JoinWindows.of(-1);
+        assertThrows(IllegalArgumentException.class, () -> JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(-1)));
+        assertThrows(IllegalArgumentException.class, () -> JoinWindows.ofTimeDifferenceAndGrace(ofMillis(-1), ofMillis(ANY_GRACE)));
+    }
+
+    @SuppressWarnings("deprecation")
+    @Test
+    public void graceShouldNotCalledAfterGraceSet() {
+        assertThrows(IllegalStateException.class, () -> JoinWindows.ofTimeDifferenceAndGrace(ofMillis(10), ofMillis(10)).grace(ofMillis(10)));
+        assertThrows(IllegalStateException.class, () -> JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(10)).grace(ofMillis(10)));
     }
 
     @Test
     public void endTimeShouldNotBeBeforeStart() {
-        final JoinWindows windowSpec = JoinWindows.of(anySize);
-        try {
-            windowSpec.after(-anySize - 1);
-            fail("window end time should not be before window start time");
-        } catch (final IllegalArgumentException e) {
-            // expected
-        }
+        final JoinWindows windowSpec = JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(ANY_SIZE));
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> windowSpec.after(ofMillis(-ANY_SIZE - 1)),
+            "should not allow window end time before window start time"
+        );
     }
 
     @Test
     public void startTimeShouldNotBeAfterEnd() {
-        final JoinWindows windowSpec = JoinWindows.of(anySize);
-        try {
-            windowSpec.before(-anySize - 1);
-            fail("window start time should not be after window end time");
-        } catch (final IllegalArgumentException e) {
-            // expected
-        }
+        final JoinWindows windowSpec = JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(ANY_SIZE));
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> windowSpec.before(ofMillis(-ANY_SIZE - 1)),
+            "should not allow window start time after window end time"
+        );
+    }
+
+    @SuppressWarnings("deprecation")
+    @Test
+    public void untilShouldSetGraceDuration() {
+        final JoinWindows windowSpec = JoinWindows.of(ofMillis(ANY_SIZE));
+        final long windowSize = windowSpec.size();
+        assertEquals(windowSize, windowSpec.grace(ofMillis(windowSize)).gracePeriodMs());
     }
 
     @Test
-    public void untilShouldSetMaintainDuration() {
-        final JoinWindows windowSpec = JoinWindows.of(anySize);
-        final long windowSize = windowSpec.size();
-        assertEquals(windowSize, windowSpec.until(windowSize).maintainMs());
+    public void gracePeriodShouldEnforceBoundaries() {
+        JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3L), ofMillis(0L));
+
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3L), ofMillis(-1L)),
+            "should not accept a negative grace period"
+        );
+    }
+
+    @SuppressWarnings("deprecation")
+    @Test
+    public void oldAPIShouldSetDefaultGracePeriod() {
+        assertEquals(Duration.ofDays(1).toMillis(), DEPRECATED_DEFAULT_24_HR_GRACE_PERIOD);
+        assertEquals(DEPRECATED_DEFAULT_24_HR_GRACE_PERIOD - 6L, JoinWindows.of(ofMillis(3L)).gracePeriodMs());
+        assertEquals(0L, JoinWindows.of(ofMillis(DEPRECATED_DEFAULT_24_HR_GRACE_PERIOD)).gracePeriodMs());
+        assertEquals(0L, JoinWindows.of(ofMillis(DEPRECATED_DEFAULT_24_HR_GRACE_PERIOD + 1L)).gracePeriodMs());
     }
 
     @Test
-    public void shouldUseWindowSizeForMaintainDurationWhenSizeLargerThanDefaultMaintainMs() {
-        final long size = Windows.DEFAULT_MAINTAIN_DURATION_MS;
-
-        final JoinWindows windowSpec = JoinWindows.of(size);
-        final long windowSize = windowSpec.size();
-
-        assertEquals(windowSize, windowSpec.maintainMs());
+    public void noGraceAPIShouldNotSetGracePeriod() {
+        assertEquals(0L, JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3L)).gracePeriodMs());
+        assertEquals(0L, JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(ANY_SIZE)).gracePeriodMs());
+        assertEquals(0L, JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(ANY_OTHER_SIZE)).gracePeriodMs());
     }
 
     @Test
-    public void retentionTimeMustNoBeSmallerThanWindowSize() {
-        final JoinWindows windowSpec = JoinWindows.of(anySize);
-        final long windowSize = windowSpec.size();
-        try {
-            windowSpec.until(windowSize - 1);
-            fail("should not accept retention time smaller than window size");
-        } catch (final IllegalArgumentException e) {
-            // expected
-        }
+    public void withGraceAPIShouldSetGracePeriod() {
+        assertEquals(ANY_GRACE, JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3L), ofMillis(ANY_GRACE)).gracePeriodMs());
+        assertEquals(ANY_GRACE, JoinWindows.ofTimeDifferenceAndGrace(ofMillis(ANY_SIZE), ofMillis(ANY_GRACE)).gracePeriodMs());
+        assertEquals(ANY_GRACE, JoinWindows.ofTimeDifferenceAndGrace(ofMillis(ANY_OTHER_SIZE), ofMillis(ANY_GRACE)).gracePeriodMs());
     }
 
+    @Test
+    public void equalsAndHashcodeShouldBeValidForPositiveCases() {
+        verifyEquality(
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3)),
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3))
+        );
+
+        verifyEquality(
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(2)),
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(2))
+        );
+
+        verifyEquality(
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3)).after(ofMillis(2)),
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3)).after(ofMillis(2))
+        );
+
+        verifyEquality(
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3)).before(ofMillis(2)),
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3)).before(ofMillis(2))
+        );
+
+        verifyEquality(
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(2)).after(ofMillis(4)),
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(2)).after(ofMillis(4))
+        );
+
+        verifyEquality(
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(2)).before(ofMillis(4)),
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(2)).before(ofMillis(4))
+        );
+    }
+
+    @Test
+    public void equalsAndHashcodeShouldBeValidForNegativeCases() {
+        verifyInEquality(
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(9)),
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3))
+        );
+
+        verifyInEquality(
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(9)),
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(2))
+        );
+
+        verifyInEquality(
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3)).after(ofMillis(9)),
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3)).after(ofMillis(2))
+        );
+
+        verifyInEquality(
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3)).before(ofMillis(9)),
+            JoinWindows.ofTimeDifferenceWithNoGrace(ofMillis(3)).before(ofMillis(2))
+        );
+
+        verifyInEquality(
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(3)).before(ofMillis(9)).after(ofMillis(2)),
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(3)).before(ofMillis(1)).after(ofMillis(2))
+        );
+
+        verifyInEquality(
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(3)).before(ofMillis(1)).after(ofMillis(9)),
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(3)).before(ofMillis(1)).after(ofMillis(2))
+        );
+
+        verifyInEquality(
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(9)).before(ofMillis(1)).after(ofMillis(2)),
+            JoinWindows.ofTimeDifferenceAndGrace(ofMillis(3), ofMillis(3)).before(ofMillis(1)).after(ofMillis(2))
+        );
+    }
 }

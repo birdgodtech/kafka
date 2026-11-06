@@ -16,96 +16,272 @@
  */
 package org.apache.kafka.streams.state;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
+import org.apache.kafka.common.annotation.SuppressKafkaInternalApiUsage;
+import org.apache.kafka.streams.KafkaStreams;
+import org.apache.kafka.streams.StoreQueryParameters;
+import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.state.internals.CompositeReadOnlyKeyValueStore;
 import org.apache.kafka.streams.state.internals.CompositeReadOnlySessionStore;
 import org.apache.kafka.streams.state.internals.CompositeReadOnlyWindowStore;
 import org.apache.kafka.streams.state.internals.StateStoreProvider;
 
+import java.util.Set;
+
 /**
- * Provides access to the {@link QueryableStoreType}s provided with KafkaStreams. These
- * can be used with {@link org.apache.kafka.streams.KafkaStreams#store(String, QueryableStoreType)}
- * To access and query the {@link StateStore}s that are part of a Topology
+ * Provides access to the {@link QueryableStoreType}s provided with {@link KafkaStreams}.
+ * These can be used with {@link KafkaStreams#store(StoreQueryParameters)}.
+ * To access and query the {@link StateStore}s that are part of a {@link Topology}.
  */
-public class QueryableStoreTypes {
+@InterfaceAudience.Public
+public final class QueryableStoreTypes {
 
     /**
-     * A {@link QueryableStoreType} that accepts {@link ReadOnlyKeyValueStore}
-     * @param <K>   key type of the store
-     * @param <V>   value type of the store
-     * @return  {@link QueryableStoreTypes.KeyValueStoreType}
+     * A {@link QueryableStoreType} that accepts {@link ReadOnlyKeyValueStore}.
+     *
+     * @param <K> key type of the store
+     * @param <V> value type of the store
+     * @return {@link QueryableStoreTypes.KeyValueStoreType}
      */
     public static <K, V> QueryableStoreType<ReadOnlyKeyValueStore<K, V>> keyValueStore() {
         return new KeyValueStoreType<>();
     }
 
     /**
-     * A {@link QueryableStoreType} that accepts {@link ReadOnlyWindowStore}
-     * @param <K>   key type of the store
-     * @param <V>   value type of the store
-     * @return  {@link QueryableStoreTypes.WindowStoreType}
+     * A {@link QueryableStoreType} that accepts {@link ReadOnlyKeyValueStore ReadOnlyKeyValueStore&lt;K, ValueAndTimestamp&lt;V&gt;&gt;}.
+     *
+     * @param <K> key type of the store
+     * @param <V> value type of the store
+     * @return {@link QueryableStoreTypes.TimestampedKeyValueStoreType}
+     */
+    public static <K, V> QueryableStoreType<ReadOnlyKeyValueStore<K, ValueAndTimestamp<V>>> timestampedKeyValueStore() {
+        return new TimestampedKeyValueStoreType<>();
+    }
+
+    /**
+     * A {@link QueryableStoreType} that accepts {@link ReadOnlyKeyValueStore ReadOnlyKeyValueStore&lt;K, ValueTimestampHeaders&lt;V&gt;&gt;}.
+     *
+     * @param <K> key type of the store
+     * @param <V> value type of the store
+     * @return {@link QueryableStoreTypes.TimestampedKeyValueStoreWithHeadersType}
+     */
+    public static <K, V> QueryableStoreType<ReadOnlyKeyValueStore<K, ValueTimestampHeaders<V>>> timestampedKeyValueStoreWithHeaders() {
+        return new TimestampedKeyValueStoreWithHeadersType<>();
+    }
+
+    /**
+     * A {@link QueryableStoreType} that accepts {@link ReadOnlyWindowStore}.
+     *
+     * @param <K> key type of the store
+     * @param <V> value type of the store
+     * @return {@link QueryableStoreTypes.WindowStoreType}
      */
     public static <K, V> QueryableStoreType<ReadOnlyWindowStore<K, V>> windowStore() {
         return new WindowStoreType<>();
     }
 
     /**
-     * A {@link QueryableStoreType} that accepts {@link ReadOnlySessionStore}
-     * @param <K>   key type of the store
-     * @param <V>   value type of the store
-     * @return  {@link QueryableStoreTypes.SessionStoreType}
+     * A {@link QueryableStoreType} that accepts {@link ReadOnlyWindowStore ReadOnlyWindowStore&lt;K, ValueAndTimestamp&lt;V&gt;&gt;}.
+     *
+     * @param <K> key type of the store
+     * @param <V> value type of the store
+     * @return {@link QueryableStoreTypes.TimestampedWindowStoreType}
+     */
+    public static <K, V> QueryableStoreType<ReadOnlyWindowStore<K, ValueAndTimestamp<V>>> timestampedWindowStore() {
+        return new TimestampedWindowStoreType<>();
+    }
+
+    /**
+     * A {@link QueryableStoreType} that accepts {@link ReadOnlyWindowStore ReadOnlyWindowStore&lt;K, ValueTimestampHeaders&lt;V&gt;&gt;}.
+     *
+     * @param <K> key type of the store
+     * @param <V> value type of the store
+     * @return {@link QueryableStoreTypes.TimestampedWindowStoreWithHeadersType}
+     */
+    public static <K, V> QueryableStoreType<ReadOnlyWindowStore<K, ValueTimestampHeaders<V>>> timestampedWindowStoreWithHeaders() {
+        return new TimestampedWindowStoreWithHeadersType<>();
+    }
+
+    /**
+     * A {@link QueryableStoreType} that accepts {@link ReadOnlySessionStore}.
+     *
+     * @param <K> key type of the store
+     * @param <V> value type of the store
+     * @return {@link QueryableStoreTypes.SessionStoreType}
      */
     public static <K, V> QueryableStoreType<ReadOnlySessionStore<K, V>> sessionStore() {
         return new SessionStoreType<>();
     }
 
-    private static abstract class QueryableStoreTypeMatcher<T> implements QueryableStoreType<T> {
+    /**
+     * A {@link QueryableStoreType} that accepts {@link ReadOnlySessionStore ReadOnlySessionStore&lt;K, AggregationWithHeaders&lt;V&gt;&gt;}.
+     *
+     * @param <K> key type of the store
+     * @param <V> value type of the store
+     * @return {@link QueryableStoreTypes.SessionStoreWithHeadersType}
+     */
+    public static <K, V> QueryableStoreType<ReadOnlySessionStore<K, AggregationWithHeaders<V>>> sessionStoreWithHeaders() {
+        return new SessionStoreWithHeadersType<>();
+    }
 
-        private final Class matchTo;
+    private abstract static class QueryableStoreTypeMatcher<T> implements QueryableStoreType<T> {
 
-        QueryableStoreTypeMatcher(Class matchTo) {
+        private final Set<Class<?>> matchTo;
+
+        QueryableStoreTypeMatcher(final Set<Class<?>> matchTo) {
             this.matchTo = matchTo;
         }
 
-        @SuppressWarnings("unchecked")
         @Override
         public boolean accepts(final StateStore stateStore) {
-            return matchTo.isAssignableFrom(stateStore.getClass());
+            for (final Class<?> matchToClass : matchTo) {
+                if (!matchToClass.isAssignableFrom(stateStore.getClass())) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 
-    private static class KeyValueStoreType<K, V> extends
-                                                 QueryableStoreTypeMatcher<ReadOnlyKeyValueStore<K, V>> {
+    public static class KeyValueStoreType<K, V> extends QueryableStoreTypeMatcher<ReadOnlyKeyValueStore<K, V>> {
+
         KeyValueStoreType() {
-            super(ReadOnlyKeyValueStore.class);
+            super(Set.of(ReadOnlyKeyValueStore.class));
         }
 
         @Override
-        public ReadOnlyKeyValueStore<K, V> create(final StateStoreProvider storeProvider,
-                                                  final String storeName) {
+        @SuppressKafkaInternalApiUsage("KIP-1265: override leaks internal StateStoreProvider — pending KIP review")
+        public ReadOnlyKeyValueStore<K, V> create(
+            final StateStoreProvider storeProvider,
+            final String storeName
+        ) {
             return new CompositeReadOnlyKeyValueStore<>(storeProvider, this, storeName);
         }
 
     }
 
-    private static class WindowStoreType<K, V> extends QueryableStoreTypeMatcher<ReadOnlyWindowStore<K, V>> {
-        WindowStoreType() {
-            super(ReadOnlyWindowStore.class);
+    public static class TimestampedKeyValueStoreType<K, V>
+        extends QueryableStoreTypeMatcher<ReadOnlyKeyValueStore<K, ValueAndTimestamp<V>>> {
+
+        TimestampedKeyValueStoreType() {
+            super(Set.of(ReadOnlyKeyValueStore.class));
         }
 
         @Override
-        public ReadOnlyWindowStore<K, V> create(final StateStoreProvider storeProvider,
-                                                final String storeName) {
+        public boolean accepts(final StateStore stateStore) {
+            return super.accepts(stateStore) &&
+                (stateStore instanceof TimestampedKeyValueStore || stateStore instanceof TimestampedKeyValueStoreWithHeaders);
+        }
+
+        @Override
+        @SuppressKafkaInternalApiUsage("KIP-1265: override leaks internal StateStoreProvider — pending KIP review")
+        public ReadOnlyKeyValueStore<K, ValueAndTimestamp<V>> create(
+            final StateStoreProvider storeProvider,
+            final String storeName
+        ) {
+            return new CompositeReadOnlyKeyValueStore<>(storeProvider, this, storeName);
+        }
+    }
+
+    private static class TimestampedKeyValueStoreWithHeadersType<K, V>
+        extends QueryableStoreTypeMatcher<ReadOnlyKeyValueStore<K, ValueTimestampHeaders<V>>> {
+
+        TimestampedKeyValueStoreWithHeadersType() {
+            super(Set.of(ReadOnlyKeyValueStore.class, TimestampedKeyValueStoreWithHeaders.class));
+        }
+
+        @Override
+        public ReadOnlyKeyValueStore<K, ValueTimestampHeaders<V>> create(
+            final StateStoreProvider storeProvider,
+            final String storeName
+        ) {
+            return new CompositeReadOnlyKeyValueStore<>(storeProvider, this, storeName);
+        }
+    }
+
+    public static class WindowStoreType<K, V> extends QueryableStoreTypeMatcher<ReadOnlyWindowStore<K, V>> {
+
+        WindowStoreType() {
+            super(Set.of(ReadOnlyWindowStore.class));
+        }
+
+        @Override
+        @SuppressKafkaInternalApiUsage("KIP-1265: override leaks internal StateStoreProvider — pending KIP review")
+        public ReadOnlyWindowStore<K, V> create(
+            final StateStoreProvider storeProvider,
+            final String storeName
+        ) {
             return new CompositeReadOnlyWindowStore<>(storeProvider, this, storeName);
         }
     }
 
-    private static class SessionStoreType<K, V> extends QueryableStoreTypeMatcher<ReadOnlySessionStore<K, V>> {
-        SessionStoreType() {
-            super(ReadOnlySessionStore.class);
+    public static class TimestampedWindowStoreType<K, V>
+        extends QueryableStoreTypeMatcher<ReadOnlyWindowStore<K, ValueAndTimestamp<V>>> {
+
+        TimestampedWindowStoreType() {
+            super(Set.of(ReadOnlyWindowStore.class));
         }
+
         @Override
-        public ReadOnlySessionStore<K, V> create(final StateStoreProvider storeProvider, final String storeName) {
+        public boolean accepts(final StateStore stateStore) {
+            return super.accepts(stateStore) &&
+                (stateStore instanceof TimestampedWindowStore || stateStore instanceof TimestampedWindowStoreWithHeaders);
+        }
+
+        @Override
+        @SuppressKafkaInternalApiUsage("KIP-1265: override leaks internal StateStoreProvider — pending KIP review")
+        public ReadOnlyWindowStore<K, ValueAndTimestamp<V>> create(
+            final StateStoreProvider storeProvider,
+            final String storeName
+        ) {
+            return new CompositeReadOnlyWindowStore<>(storeProvider, this, storeName);
+        }
+    }
+
+    private static class TimestampedWindowStoreWithHeadersType<K, V>
+        extends QueryableStoreTypeMatcher<ReadOnlyWindowStore<K, ValueTimestampHeaders<V>>> {
+
+        TimestampedWindowStoreWithHeadersType() {
+            super(Set.of(ReadOnlyWindowStore.class, TimestampedWindowStoreWithHeaders.class));
+        }
+
+        @Override
+        public ReadOnlyWindowStore<K, ValueTimestampHeaders<V>> create(
+            final StateStoreProvider storeProvider,
+            final String storeName
+        ) {
+            return new CompositeReadOnlyWindowStore<>(storeProvider, this, storeName);
+        }
+    }
+
+    public static class SessionStoreType<K, V> extends QueryableStoreTypeMatcher<ReadOnlySessionStore<K, V>> {
+
+        SessionStoreType() {
+            super(Set.of(ReadOnlySessionStore.class));
+        }
+
+        @Override
+        @SuppressKafkaInternalApiUsage("KIP-1265: override leaks internal StateStoreProvider — pending KIP review")
+        public ReadOnlySessionStore<K, V> create(
+            final StateStoreProvider storeProvider,
+            final String storeName
+        ) {
+            return new CompositeReadOnlySessionStore<>(storeProvider, this, storeName);
+        }
+    }
+
+    private static class SessionStoreWithHeadersType<K, V> extends QueryableStoreTypeMatcher<ReadOnlySessionStore<K, AggregationWithHeaders<V>>> {
+
+        SessionStoreWithHeadersType() {
+            super(Set.of(ReadOnlySessionStore.class, SessionStoreWithHeaders.class));
+        }
+
+        @Override
+        public ReadOnlySessionStore<K, AggregationWithHeaders<V>> create(
+            final StateStoreProvider storeProvider,
+            final String storeName
+        ) {
             return new CompositeReadOnlySessionStore<>(storeProvider, this, storeName);
         }
     }

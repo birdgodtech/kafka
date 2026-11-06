@@ -14,17 +14,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.serialization;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
 import java.nio.ByteBuffer;
-import java.util.Map;
 
+/**
+ * {@code ByteBufferSerializer} always {@link ByteBuffer#rewind() rewinds} the position of the input buffer to zero for
+ * serialization. A manual rewind is not necessary.
+ * <p>
+ * Note: any existing buffer position is ignored.
+ * <p>
+ * The position is also rewound back to zero before {@link #serialize(String, ByteBuffer)}
+ * returns.
+ */
+@InterfaceAudience.Public
 public class ByteBufferSerializer implements Serializer<ByteBuffer> {
-
-    public void configure(Map<String, ?> configs, boolean isKey) {
-        // nothing to do
-    }
-
     public byte[] serialize(String topic, ByteBuffer data) {
         if (data == null)
             return null;
@@ -42,9 +49,5 @@ public class ByteBufferSerializer implements Serializer<ByteBuffer> {
         data.get(ret, 0, ret.length);
         data.rewind();
         return ret;
-    }
-
-    public void close() {
-        // nothing to do
     }
 }

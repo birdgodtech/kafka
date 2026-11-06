@@ -16,51 +16,77 @@
  */
 package org.apache.kafka.streams;
 
-import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.CommonClientConfigs;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.ListOffsetsResult.ListOffsetsResultInfo;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.annotation.InterfaceStability;
-import org.apache.kafka.common.config.ConfigException;
-import org.apache.kafka.common.metrics.JmxReporter;
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.annotation.InterfaceAudience;
+import org.apache.kafka.common.annotation.InterfaceStability.Evolving;
+import org.apache.kafka.common.annotation.SuppressKafkaInternalApiUsage;
+import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeaders;
+import org.apache.kafka.common.metrics.KafkaMetricsContext;
 import org.apache.kafka.common.metrics.MetricConfig;
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.MetricsContext;
 import org.apache.kafka.common.metrics.MetricsReporter;
 import org.apache.kafka.common.metrics.Sensor;
+import org.apache.kafka.common.metrics.Sensor.RecordingLevel;
 import org.apache.kafka.common.serialization.Serializer;
-import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Timer;
+import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.utils.internals.LogContext;
+import org.apache.kafka.streams.CloseOptions.GroupMembershipOperation;
 import org.apache.kafka.streams.errors.InvalidStateStoreException;
+import org.apache.kafka.streams.errors.InvalidStateStorePartitionException;
 import org.apache.kafka.streams.errors.ProcessorStateException;
 import org.apache.kafka.streams.errors.StreamsException;
-import org.apache.kafka.streams.kstream.KStream;
-import org.apache.kafka.streams.kstream.KTable;
-import org.apache.kafka.streams.kstream.Produced;
-import org.apache.kafka.streams.processor.Processor;
+import org.apache.kafka.streams.errors.StreamsNotStartedException;
+import org.apache.kafka.streams.errors.StreamsStoppedException;
+import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
+import org.apache.kafka.streams.errors.UnknownStateStoreException;
+import org.apache.kafka.streams.internals.ClientInstanceIdsImpl;
+import org.apache.kafka.streams.internals.CloseOptionsInternal;
+import org.apache.kafka.streams.internals.metrics.ClientMetrics;
+import org.apache.kafka.streams.internals.metrics.StreamsClientMetricsDelegatingReporter;
+import org.apache.kafka.streams.processor.StandbyUpdateListener;
 import org.apache.kafka.streams.processor.StateRestoreListener;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.StreamPartitioner;
-import org.apache.kafka.streams.processor.ThreadMetadata;
+import org.apache.kafka.streams.processor.TaskId;
+import org.apache.kafka.streams.processor.internals.ClientUtils;
 import org.apache.kafka.streams.processor.internals.DefaultKafkaClientSupplier;
 import org.apache.kafka.streams.processor.internals.GlobalStreamThread;
-import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
-import org.apache.kafka.streams.processor.internals.ProcessorTopology;
 import org.apache.kafka.streams.processor.internals.StateDirectory;
 import org.apache.kafka.streams.processor.internals.StreamThread;
 import org.apache.kafka.streams.processor.internals.StreamsMetadataState;
+import org.apache.kafka.streams.processor.internals.Task;
 import org.apache.kafka.streams.processor.internals.ThreadStateTransitionValidator;
+import org.apache.kafka.streams.processor.internals.TopologyMetadata;
+import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
+import org.apache.kafka.streams.processor.internals.namedtopology.NamedTopology;
+import org.apache.kafka.streams.query.FailureReason;
+import org.apache.kafka.streams.query.PositionBound;
+import org.apache.kafka.streams.query.QueryConfig;
+import org.apache.kafka.streams.query.QueryResult;
+import org.apache.kafka.streams.query.StateQueryRequest;
+import org.apache.kafka.streams.query.StateQueryResult;
 import org.apache.kafka.streams.state.HostInfo;
-import org.apache.kafka.streams.state.QueryableStoreType;
-import org.apache.kafka.streams.state.StreamsMetadata;
 import org.apache.kafka.streams.state.internals.GlobalStateStoreProvider;
 import org.apache.kafka.streams.state.internals.QueryableStoreProvider;
-import org.apache.kafka.streams.state.internals.StateStoreProvider;
 import org.apache.kafka.streams.state.internals.StreamThreadStateStoreProvider;
+
 import org.slf4j.Logger;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -68,25 +94,40 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
-import static org.apache.kafka.common.utils.Utils.getHost;
-import static org.apache.kafka.common.utils.Utils.getPort;
+import static org.apache.kafka.streams.StreamsConfig.METRICS_RECORDING_LEVEL_CONFIG;
+import static org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.SHUTDOWN_CLIENT;
+import static org.apache.kafka.streams.internals.ApiUtils.prepareMillisCheckFailMsgPrefix;
+import static org.apache.kafka.streams.internals.ApiUtils.validateMillisecondDuration;
+import static org.apache.kafka.streams.internals.StreamsConfigUtils.totalCacheSize;
+import static org.apache.kafka.streams.processor.internals.ClientUtils.fetchEndOffsets;
+import static org.apache.kafka.streams.processor.internals.TopologyMetadata.UNNAMED_TOPOLOGY;
 
 /**
  * A Kafka client that allows for performing continuous computation on input coming from one or more input topics and
  * sends output to zero, one, or more output topics.
  * <p>
  * The computational logic can be specified either by using the {@link Topology} to define a DAG topology of
- * {@link Processor}s or by using the {@link StreamsBuilder} which provides the high-level DSL to define
+ * {@link org.apache.kafka.streams.processor.api.Processor}s or by using the {@link StreamsBuilder} which provides the high-level DSL to define
  * transformations.
  * <p>
  * One {@code KafkaStreams} instance can contain one or more threads specified in the configs for the processing work.
@@ -104,14 +145,14 @@ import static org.apache.kafka.common.utils.Utils.getPort;
  * <p>
  * A simple example might look like this:
  * <pre>{@code
- * Map<String, Object> props = new HashMap<>();
+ * Properties props = new Properties();
  * props.put(StreamsConfig.APPLICATION_ID_CONFIG, "my-stream-processing-application");
  * props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
  * props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass());
  * props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass());
  *
  * StreamsBuilder builder = new StreamsBuilder();
- * builder.<String, String>stream("my-input-topic").mapValues(value -> value.length().toString()).to("my-output-topic");
+ * builder.<String, String>stream("my-input-topic").mapValues(value -> String.valueOf(value.length())).to("my-output-topic");
  *
  * KafkaStreams streams = new KafkaStreams(builder.build(), props);
  * streams.start();
@@ -120,11 +161,10 @@ import static org.apache.kafka.common.utils.Utils.getPort;
  * @see org.apache.kafka.streams.StreamsBuilder
  * @see org.apache.kafka.streams.Topology
  */
-@InterfaceStability.Evolving
-public class KafkaStreams {
+@InterfaceAudience.Public
+public class KafkaStreams implements AutoCloseable {
 
     private static final String JMX_PREFIX = "kafka.streams";
-    private static final int DEFAULT_CLOSE_TIMEOUT = 0;
 
     // processId is expected to be unique across JVMs and to be used
     // in userData of the subscription request to allow assignor be aware
@@ -132,20 +172,34 @@ public class KafkaStreams {
     // usage only and should not be exposed to users at all.
     private final Time time;
     private final Logger log;
-    private final UUID processId;
-    private final String clientId;
+    protected final String clientId;
     private final Metrics metrics;
-    private final StreamsConfig config;
-    private final StreamThread[] threads;
-    private final StateDirectory stateDirectory;
-    private final StreamsMetadataState streamsMetadataState;
+    protected final StreamsConfig applicationConfigs;
+    @SuppressKafkaInternalApiUsage("KIP-1265: protected field's generic signature exposes internal StreamThread for subclass access — pending KIP review to promote the type or refactor")
+    protected final List<StreamThread> threads;
+    @SuppressKafkaInternalApiUsage("KIP-1265: protected field exposes internal StreamsMetadataState for subclass access — pending KIP review to promote the type or refactor")
+    protected final StreamsMetadataState streamsMetadataState;
     private final ScheduledExecutorService stateDirCleaner;
+    private final ScheduledExecutorService rocksDBMetricsRecordingService;
+    protected final Admin adminClient;
+    private final StreamsMetricsImpl streamsMetrics;
+    private final long totalCacheSize;
+    private final StreamStateListener streamStateListener;
+    private final DelegatingStateRestoreListener delegatingStateRestoreListener;
+    private final UUID processId;
+    private final KafkaClientSupplier clientSupplier;
+    @SuppressKafkaInternalApiUsage("KIP-1265: protected field exposes internal TopologyMetadata for subclass access — pending KIP review to promote the type or refactor")
+    protected final TopologyMetadata topologyMetadata;
     private final QueryableStoreProvider queryableStoreProvider;
-    private final AdminClient adminClient;
+    private final DelegatingStandbyUpdateListener delegatingStandbyUpdateListener;
+    private final LogContext logContext;
 
-    private GlobalStreamThread globalStreamThread;
+    GlobalStreamThread globalStreamThread;
+    @SuppressKafkaInternalApiUsage("KIP-1265: protected field exposes internal StateDirectory for subclass access — pending KIP review to promote the type or refactor")
+    protected StateDirectory stateDirectory = null;
     private KafkaStreams.StateListener stateListener;
-    private StateRestoreListener globalStateRestoreListener;
+    private BiConsumer<Throwable, Boolean> streamsUncaughtExceptionHandler;
+    private final Object changeThreadCount = new Object();
 
     // container states
     /**
@@ -155,43 +209,69 @@ public class KafkaStreams {
      *
      * <pre>
      *                 +--------------+
-     *         +<----- | Created (0)  |
+     *         +&lt;----- | Created (0)  |
      *         |       +-----+--------+
      *         |             |
      *         |             v
-     *         |       +--------------+
-     *         +<----- | Running (2)  | -------->+
-     *         |       +----+--+------+          |
-     *         |            |  ^                 |
-     *         |            v  |                 |
-     *         |       +----+--+------+          |
-     *         |       | Re-          |          v
-     *         |       | Balancing (1)| -------->+
-     *         |       +-----+--------+          |
-     *         |             |                   |
-     *         |             v                   v
-     *         |       +-----+--------+     +----+-------+
-     *         +-----> | Pending      |<--- | Error (5)  |
-     *                 | Shutdown (3) |     +------------+
-     *                 +-----+--------+
-     *                       |
-     *                       v
-     *                 +-----+--------+
-     *                 | Not          |
-     *                 | Running (4)  |
+     *         |       +----+--+------+
+     *         |       | Re-          |
+     *         +&lt;----- | Balancing (1)| --------&gt;+
+     *         |       +-----+-+------+          |
+     *         |             | ^                 |
+     *         |             v |                 |
+     *         |       +--------------+          v
+     *         |       | Running (2)  | --------&gt;+
+     *         |       +------+-------+          |
+     *         |              |                  |
+     *         |              v                  |
+     *         |       +------+-------+     +----+-------+
+     *         +-----&gt; | Pending      |     | Pending    |
+     *                 | Shutdown (3) |     | Error (5)  |
+     *                 +------+-------+     +-----+------+
+     *                        |                   |
+     *                        v                   v
+     *                 +------+-------+     +-----+--------+
+     *                 | Not          |     | Error (6)    |
+     *                 | Running (4)  |     +--------------+
      *                 +--------------+
      *
      *
      * </pre>
      * Note the following:
-     * - RUNNING state will transit to REBALANCING if any of its threads is in PARTITION_REVOKED state
-     * - REBALANCING state will transit to RUNNING if all of its threads are in RUNNING state
-     * - Any state except NOT_RUNNING can go to PENDING_SHUTDOWN (whenever close is called)
-     * - Of special importance: If the global stream thread dies, or all stream threads die (or both) then
-     *   the instance will be in the ERROR state. The user will need to close it.
+     * <ul>
+     *   <li>
+     *     RUNNING state will transit to REBALANCING if any of its threads is in PARTITION_REVOKED or PARTITIONS_ASSIGNED state
+     *   </li>
+     *   <li>
+     *     REBALANCING state will transit to RUNNING if all of its threads are in RUNNING state
+     *     (Note: a thread transits to RUNNING state, if all active tasks got restored are ready for processing.
+     *     Standby tasks are not considered.)
+     *   </li>
+     *   <li>
+     *     Any state except NOT_RUNNING, PENDING_ERROR or ERROR can go to PENDING_SHUTDOWN (whenever close is called)
+     *   </li>
+     *   <li>
+     *     PENDING_SHUTDOWN and PENDING_ERROR are transitory states where the Streams application gracefully closes
+     *     its existing resources before transitioning into their corresponding terminal states. These states are
+     *     not recoverable, and only a restart would get an application back to the RUNNING state.
+     *   </li>
+     *   <li>
+     *     Of special importance: If the global stream thread dies, or all stream threads die (or both) then
+     *     the instance will be in the ERROR state. The user will not need to close it.
+     *   </li>
+     * </ul>
      */
     public enum State {
-        CREATED(2, 3), REBALANCING(2, 3, 5), RUNNING(1, 3, 5), PENDING_SHUTDOWN(4), NOT_RUNNING, ERROR(3);
+        // Note: if you add a new state, check the below methods and how they are used within Streams to see if
+        // any of them should be updated to include the new state. For example a new shutdown path or terminal
+        // state would likely need to be included in methods like isShuttingDown(), hasCompletedShutdown(), etc.
+        CREATED(1, 3),          // 0
+        REBALANCING(2, 3, 5),   // 1
+        RUNNING(1, 2, 3, 5),    // 2
+        PENDING_SHUTDOWN(4),    // 3
+        NOT_RUNNING,            // 4
+        PENDING_ERROR(6),       // 5
+        ERROR;                  // 6
 
         private final Set<Integer> validTransitions = new HashSet<>();
 
@@ -199,8 +279,24 @@ public class KafkaStreams {
             this.validTransitions.addAll(Arrays.asList(validTransitions));
         }
 
-        public boolean isRunning() {
+        public boolean hasNotStarted() {
+            return equals(CREATED);
+        }
+
+        public boolean isRunningOrRebalancing() {
             return equals(RUNNING) || equals(REBALANCING);
+        }
+
+        public boolean isShuttingDown() {
+            return equals(PENDING_SHUTDOWN) || equals(PENDING_ERROR);
+        }
+
+        public boolean hasCompletedShutdown() {
+            return equals(NOT_RUNNING) || equals(ERROR);
+        }
+
+        public boolean hasStartedOrFinishedShuttingDown() {
+            return isShuttingDown() || hasCompletedShutdown();
         }
 
         public boolean isValidTransition(final State newState) {
@@ -209,31 +305,41 @@ public class KafkaStreams {
     }
 
     private final Object stateLock = new Object();
-    private volatile State state = State.CREATED;
+    protected volatile State state = State.CREATED;
 
-    private boolean waitOnState(final State targetState, final long waitMs) {
-        long begin = time.milliseconds();
+    private boolean waitOnStates(final long waitMs, final State... targetStates) {
+        final Set<State> targetStateSet = Set.of(targetStates);
+        final long begin = time.milliseconds();
         synchronized (stateLock) {
+            boolean interrupted = false;
             long elapsedMs = 0L;
-            while (state != targetState) {
-                if (waitMs == 0) {
-                    try {
-                        stateLock.wait();
-                    } catch (final InterruptedException e) {
-                        // it is ok: just move on to the next iteration
+            try {
+                while (!targetStateSet.contains(state)) {
+                    if (waitMs > elapsedMs) {
+                        final long remainingMs = waitMs - elapsedMs;
+                        try {
+                            stateLock.wait(remainingMs);
+                        } catch (final InterruptedException e) {
+                            interrupted = true;
+                        }
+                    } else {
+                        log.debug(
+                            "Cannot transit to {} within {}ms",
+                            Arrays.stream(targetStates).map(State::toString).collect(Collectors.joining(" or ")),
+                            waitMs
+                        );
+                        return false;
                     }
-                } else if (waitMs > elapsedMs) {
-                    long remainingMs = waitMs - elapsedMs;
-                    try {
-                        stateLock.wait(remainingMs);
-                    } catch (final InterruptedException e) {
-                        // it is ok: just move on to the next iteration
-                    }
-                } else {
-                    log.debug("Cannot transit to {} within {}ms", targetState, waitMs);
-                    return false;
+                    elapsedMs = time.milliseconds() - begin;
                 }
-                elapsedMs = time.milliseconds() - begin;
+            } finally {
+                // Make sure to restore the interruption status before returning.
+                // We do not always own the current thread that executes this method, i.e., we do not know the
+                // interruption policy of the thread. The least we can do is restore the interruption status before
+                // the current thread exits this method.
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
             return true;
         }
@@ -244,16 +350,29 @@ public class KafkaStreams {
      * @param newState New state
      */
     private boolean setState(final State newState) {
-        final State oldState = state;
+        final State oldState;
 
         synchronized (stateLock) {
+            oldState = state;
+
             if (state == State.PENDING_SHUTDOWN && newState != State.NOT_RUNNING) {
                 // when the state is already in PENDING_SHUTDOWN, all other transitions than NOT_RUNNING (due to thread dying) will be
-                // refused but we do not throw exception here, to allow appropriate error handling
+                // refused, but we do not throw exception here, to allow appropriate error handling
                 return false;
             } else if (state == State.NOT_RUNNING && (newState == State.PENDING_SHUTDOWN || newState == State.NOT_RUNNING)) {
                 // when the state is already in NOT_RUNNING, its transition to PENDING_SHUTDOWN or NOT_RUNNING (due to consecutive close calls)
-                // will be refused but we do not throw exception here, to allow idempotent close calls
+                // will be refused, but we do not throw exception here, to allow idempotent close calls
+                return false;
+            } else if (state == State.REBALANCING && newState == State.REBALANCING) {
+                // when the state is already in REBALANCING, it should not transit to REBALANCING again
+                return false;
+            } else if (state == State.ERROR && (newState == State.PENDING_ERROR || newState == State.ERROR || newState == State.PENDING_SHUTDOWN)) {
+                // when the state is already in ERROR, its transition attempts to PENDING_SHUTDOWN, PENDING_ERROR or ERROR will
+                // not throw an exception.
+                return false;
+            } else if (state == State.PENDING_ERROR && newState != State.ERROR) {
+                // when the state is already in PENDING_ERROR, all other transitions than ERROR (due to thread dying) will be
+                // refused, but we do not throw exception here, to allow appropriate error handling
                 return false;
             } else if (!state.isValidTransition(newState)) {
                 throw new IllegalStateException("Stream-client " + clientId + ": Unexpected state transition from " + oldState + " to " + newState);
@@ -266,24 +385,7 @@ public class KafkaStreams {
 
         // we need to call the user customized state listener outside the state lock to avoid potential deadlocks
         if (stateListener != null) {
-            stateListener.onChange(state, oldState);
-        }
-
-        return true;
-    }
-
-    private boolean setRunningFromCreated() {
-        synchronized (stateLock) {
-            if (state != State.CREATED) {
-                throw new IllegalStateException("Stream-client " + clientId + ": Unexpected state transition from " + state + " to " + State.RUNNING);
-            }
-            state = State.RUNNING;
-            stateLock.notifyAll();
-        }
-
-        // we need to call the user customized state listener outside the state lock to avoid potential deadlocks
-        if (stateListener != null) {
-            stateListener.onChange(State.RUNNING, State.CREATED);
+            stateListener.onChange(newState, oldState);
         }
 
         return true;
@@ -298,17 +400,29 @@ public class KafkaStreams {
         return state;
     }
 
-    private boolean isRunning() {
+    protected boolean isRunningOrRebalancing() {
         synchronized (stateLock) {
-            return state.isRunning();
+            return state.isRunningOrRebalancing();
         }
     }
 
-    private void validateIsRunning() {
-        if (!isRunning()) {
-            throw new IllegalStateException("KafkaStreams is not running. State is " + state + ".");
+    protected boolean hasStartedOrFinishedShuttingDown() {
+        synchronized (stateLock) {
+            return state.hasStartedOrFinishedShuttingDown();
         }
     }
+
+    protected void validateIsRunningOrRebalancing() {
+        synchronized (stateLock) {
+            if (state.hasNotStarted()) {
+                throw new StreamsNotStartedException("KafkaStreams has not been started, you can retry after calling start()");
+            }
+            if (!state.isRunningOrRebalancing()) {
+                throw new IllegalStateException("KafkaStreams is not running. State is " + state + ".");
+            }
+        }
+    }
+
     /**
      * Listen to {@link State} change events.
      */
@@ -327,36 +441,132 @@ public class KafkaStreams {
      * An app can set a single {@link KafkaStreams.StateListener} so that the app is notified when state changes.
      *
      * @param listener a new state listener
-     * @throws IllegalStateException if this {@code KafkaStreams} instance is not in state {@link State#CREATED CREATED}.
+     * @throws IllegalStateException if this {@code KafkaStreams} instance has already been started.
      */
     public void setStateListener(final KafkaStreams.StateListener listener) {
-        if (state == State.CREATED) {
-            stateListener = listener;
-        } else {
-            throw new IllegalStateException("Can only set StateListener in CREATED state. " +
-                    "Current state is: " + state);
+        synchronized (stateLock) {
+            if (state.hasNotStarted()) {
+                stateListener = listener;
+            } else {
+                throw new IllegalStateException("Can only set StateListener before calling start(). Current state is: " + state);
+            }
         }
     }
 
-    /**
-     * Set the handler invoked when a {@link StreamsConfig#NUM_STREAM_THREADS_CONFIG internal thread} abruptly
-     * terminates due to an uncaught exception.
-     *
-     * @param eh the uncaught exception handler for all internal threads; {@code null} deletes the current handler
-     * @throws IllegalStateException if this {@code KafkaStreams} instance is not in state {@link State#CREATED CREATED}.
-     */
-    public void setUncaughtExceptionHandler(final Thread.UncaughtExceptionHandler eh) {
-        if (state == State.CREATED) {
-            for (final StreamThread thread : threads) {
-                thread.setUncaughtExceptionHandler(eh);
-            }
 
-            if (globalStreamThread != null) {
-                globalStreamThread.setUncaughtExceptionHandler(eh);
-            }
-        } else {
-            throw new IllegalStateException("Can only set UncaughtExceptionHandler in CREATED state. " +
+    /**
+     * Set the handler invoked when an internal {@link StreamsConfig#NUM_STREAM_THREADS_CONFIG stream thread}
+     * throws an unexpected exception.
+     * These might be exceptions indicating rare bugs in Kafka Streams, or they
+     * might be exceptions thrown by your code, for example a NullPointerException thrown from your processor logic.
+     * The handler will execute on the thread that produced the exception.
+     * In order to get the thread that threw the exception, use {@code Thread.currentThread()}.
+     * <p>
+     * Note, this handler must be thread safe, since it will be shared among all threads, and invoked from any
+     * thread that encounters such an exception.
+     *
+     * @param userStreamsUncaughtExceptionHandler the uncaught exception handler of type {@link StreamsUncaughtExceptionHandler} for all internal threads
+     * @throws IllegalStateException if this {@code KafkaStreams} instance has already been started.
+     * @throws NullPointerException if userStreamsUncaughtExceptionHandler is null.
+     */
+    public void setUncaughtExceptionHandler(final StreamsUncaughtExceptionHandler userStreamsUncaughtExceptionHandler) {
+        synchronized (stateLock) {
+            if (state.hasNotStarted()) {
+                Objects.requireNonNull(userStreamsUncaughtExceptionHandler);
+                streamsUncaughtExceptionHandler =
+                    (exception, skipThreadReplacement) ->
+                        handleStreamsUncaughtException(exception, userStreamsUncaughtExceptionHandler, skipThreadReplacement);
+                processStreamThread(thread -> thread.setStreamsUncaughtExceptionHandler(streamsUncaughtExceptionHandler));
+                if (globalStreamThread != null) {
+                    globalStreamThread.setUncaughtExceptionHandler(
+                        exception -> handleStreamsUncaughtException(exception, userStreamsUncaughtExceptionHandler, false)
+                    );
+                }
+                processStreamThread(thread -> thread.setUncaughtExceptionHandler((t, e) -> { }
+                ));
+            } else {
+                throw new IllegalStateException("Can only set UncaughtExceptionHandler before calling start(). " +
                     "Current state is: " + state);
+            }
+        }
+    }
+
+    private void replaceStreamThread(final Throwable throwable) {
+        if (globalStreamThread != null && Thread.currentThread().getName().equals(globalStreamThread.getName())) {
+            log.warn("The global thread cannot be replaced. Reverting to shutting down the client.");
+            log.error("Encountered the following exception during processing " +
+                    " The streams client is going to shut down now. ", throwable);
+            closeToError();
+            return;
+        }
+
+        final StreamThread deadThread = (StreamThread) Thread.currentThread();
+
+        // Use DEFAULT so the consumer layer decides: classic protocol maps to REMAIN_IN_GROUP
+        // (avoiding an unnecessary rebalance before the replacement thread joins), while Streams
+        // protocol adapts to static vs dynamic membership.
+        if (deadThread.shutdown(GroupMembershipOperation.DEFAULT)) {
+            addStreamThread();
+        } else {
+            // A concurrent removeStreamThread (or client close) already requested this thread's
+            // shutdown and owns its death. Spawning a replacement would silently undo that
+            // operation, so let the thread die without compensation.
+            log.debug("Not spawning a replacement for {} since its shutdown was already requested elsewhere", deadThread.getName());
+        }
+
+        if (throwable instanceof RuntimeException) {
+            throw (RuntimeException) throwable;
+        } else if (throwable instanceof Error) {
+            throw (Error) throwable;
+        } else {
+            throw new RuntimeException("Unexpected checked exception caught in the uncaught exception handler", throwable);
+        }
+    }
+
+    private void handleStreamsUncaughtException(final Throwable throwable,
+                                                final StreamsUncaughtExceptionHandler streamsUncaughtExceptionHandler,
+                                                final boolean skipThreadReplacement) {
+        final StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse action = streamsUncaughtExceptionHandler.handle(throwable);
+
+        switch (action) {
+            case REPLACE_THREAD:
+                if (!skipThreadReplacement) {
+                    log.error("Replacing thread in the streams uncaught exception handler", throwable);
+                    replaceStreamThread(throwable);
+                } else {
+                    log.debug("Skipping thread replacement for recoverable error");
+                }
+                break;
+            case SHUTDOWN_CLIENT:
+                log.error(
+                    "Encountered the following exception during processing and the registered exception handler " +
+                        "opted to {}. The streams client is going to shut down now.",
+                    action,
+                    throwable
+                );
+                closeToError();
+                break;
+            case SHUTDOWN_APPLICATION:
+                if (numLiveStreamThreads() == 1) {
+                    log.warn("Attempt to shut down the application requires adding a thread to communicate the shutdown. No processing will be done on this thread");
+                    addStreamThread();
+                }
+                if (throwable instanceof Error) {
+                    log.error("This option requires running threads to shut down the application." +
+                            "but the uncaught exception was an Error, which means this runtime is no " +
+                            "longer in a well-defined state. Attempting to send the shutdown command anyway.", throwable);
+                }
+                if (Thread.currentThread().equals(globalStreamThread) && numLiveStreamThreads() == 0) {
+                    log.error("Exception in global thread caused the application to attempt to shutdown." +
+                            " This action will succeed only if there is at least one StreamThread running on this client." +
+                            " Currently there are no running threads so will now close the client.");
+                    closeToError();
+                    break;
+                }
+                processStreamThread(StreamThread::sendShutdownRequest);
+                log.error("Encountered the following exception during processing " +
+                        "and sent shutdown request for the entire application.", throwable);
+                break;
         }
     }
 
@@ -365,31 +575,58 @@ public class KafkaStreams {
      * processing.
      *
      * @param globalStateRestoreListener The listener triggered when {@link StateStore} is being restored.
-     * @throws IllegalStateException if this {@code KafkaStreams} instance is not in state {@link State#CREATED CREATED}.
+     * @throws IllegalStateException if this {@code KafkaStreams} instance has already been started.
      */
     public void setGlobalStateRestoreListener(final StateRestoreListener globalStateRestoreListener) {
-        if (state == State.CREATED) {
-            this.globalStateRestoreListener = globalStateRestoreListener;
-        } else {
-            throw new IllegalStateException("Can only set GlobalStateRestoreListener in CREATED state. " +
+        synchronized (stateLock) {
+            if (state.hasNotStarted()) {
+                delegatingStateRestoreListener.setUserStateRestoreListener(globalStateRestoreListener);
+            } else {
+                throw new IllegalStateException("Can only set GlobalStateRestoreListener before calling start(). " +
                     "Current state is: " + state);
+            }
+        }
+    }
+
+    /**
+     * Set the listener which is triggered whenever a standby task is updated
+     *
+     * @param standbyListener The listener triggered when a standby task is updated.
+     * @throws IllegalStateException if this {@code KafkaStreams} instance has already been started.
+     */
+    public void setStandbyUpdateListener(final StandbyUpdateListener standbyListener) {
+        synchronized (stateLock) {
+            if (state.hasNotStarted()) {
+                this.delegatingStandbyUpdateListener.setUserStandbyListener(standbyListener);
+            } else {
+                throw new IllegalStateException("Can only set StandbyUpdateListener before calling start(). " +
+                        "Current state is: " + state);
+            }
         }
     }
 
     /**
      * Get read-only handle on global metrics registry, including streams client's own metrics plus
-     * its embedded consumer clients' metrics.
+     * its embedded producer, consumer and admin clients' metrics.
      *
      * @return Map of all metrics.
      */
-    // TODO: we can add metrics for admin client as well
     public Map<MetricName, ? extends Metric> metrics() {
         final Map<MetricName, Metric> result = new LinkedHashMap<>();
-        for (final StreamThread thread : threads) {
+        // producer and consumer clients are per-thread
+        processStreamThread(thread -> {
             result.putAll(thread.producerMetrics());
             result.putAll(thread.consumerMetrics());
+            // admin client is shared, so we can actually move it
+            // to result.putAll(adminClient.metrics()).
+            // we did it intentionally just for flexibility.
+            result.putAll(thread.adminClientMetrics());
+        });
+        // global thread's consumer client
+        if (globalStreamThread != null) {
+            result.putAll(globalStreamThread.consumerMetrics());
         }
-        if (globalStreamThread != null) result.putAll(globalStreamThread.consumerMetrics());
+        // self streams metrics
         result.putAll(metrics.metrics());
         return Collections.unmodifiableMap(result);
     }
@@ -397,42 +634,30 @@ public class KafkaStreams {
     /**
      * Class that handles stream thread transitions
      */
-    final class StreamStateListener implements StreamThread.StateListener {
+    private final class StreamStateListener implements StreamThread.StateListener {
         private final Map<Long, StreamThread.State> threadState;
         private GlobalStreamThread.State globalThreadState;
 
-        StreamStateListener(final Map<Long, StreamThread.State> threadState,
-                            final GlobalStreamThread.State globalThreadState) {
-            this.threadState = threadState;
+        StreamStateListener(final GlobalStreamThread.State globalThreadState) {
+            this.threadState = new HashMap<>();
             this.globalThreadState = globalThreadState;
-        }
-
-        /**
-         * If all threads are dead set to ERROR
-         */
-        private void maybeSetError() {
-            // check if we have enough threads running
-            for (final StreamThread.State state : threadState.values()) {
-                if (state != StreamThread.State.DEAD) {
-                    return;
-                }
-            }
-
-            if (setState(State.ERROR)) {
-                log.warn("All stream threads have died. The instance will be in error state and should be closed.");
-            }
         }
 
         /**
          * If all threads are up, including the global thread, set to RUNNING
          */
         private void maybeSetRunning() {
-            // one thread is running, check others, including global thread
+            // state can be transferred to RUNNING if
+            // 1) all threads are either RUNNING or DEAD
+            // 2) thread is pending-shutdown and there are still other threads running
+            final boolean hasRunningThread = threadState.values().stream().anyMatch(s -> s == StreamThread.State.RUNNING);
             for (final StreamThread.State state : threadState.values()) {
-                if (state != StreamThread.State.RUNNING) {
+                if (state == StreamThread.State.PENDING_SHUTDOWN && hasRunningThread) continue;
+                if (state != StreamThread.State.RUNNING && state != StreamThread.State.DEAD) {
                     return;
                 }
             }
+
             // the global state thread is relevant only if it is started. There are cases
             // when we don't have a global state thread at all, e.g., when we don't have global KTables
             if (globalThreadState != null && globalThreadState != GlobalStreamThread.State.RUNNING) {
@@ -449,30 +674,38 @@ public class KafkaStreams {
                                           final ThreadStateTransitionValidator abstractOldState) {
             // StreamThreads first
             if (thread instanceof StreamThread) {
-                StreamThread.State newState = (StreamThread.State) abstractNewState;
+                final StreamThread.State newState = (StreamThread.State) abstractNewState;
                 threadState.put(thread.getId(), newState);
 
-                if (newState == StreamThread.State.PARTITIONS_REVOKED && state != State.REBALANCING) {
+                if (newState == StreamThread.State.PARTITIONS_REVOKED || newState == StreamThread.State.PARTITIONS_ASSIGNED) {
                     setState(State.REBALANCING);
-                } else if (newState == StreamThread.State.RUNNING && state != State.RUNNING) {
+                } else if (newState == StreamThread.State.RUNNING) {
                     maybeSetRunning();
-                } else if (newState == StreamThread.State.DEAD && state != State.ERROR) {
-                    maybeSetError();
                 }
             } else if (thread instanceof GlobalStreamThread) {
                 // global stream thread has different invariants
-                GlobalStreamThread.State newState = (GlobalStreamThread.State) abstractNewState;
+                final GlobalStreamThread.State newState = (GlobalStreamThread.State) abstractNewState;
                 globalThreadState = newState;
 
-                // special case when global thread is dead
-                if (newState == GlobalStreamThread.State.DEAD && state != State.ERROR && setState(State.ERROR)) {
-                    log.warn("Global thread has died. The instance will be in error state and should be closed.");
+                if (newState == GlobalStreamThread.State.RUNNING) {
+                    maybeSetRunning();
+                } else if (newState == GlobalStreamThread.State.DEAD) {
+                    if (state != State.PENDING_SHUTDOWN) {
+                        log.error("Global thread has died. The streams application or client will now close to ERROR.");
+                        closeToError();
+                    }
                 }
             }
         }
+
+        private synchronized void registerStreamThread(final StreamThread streamThread) {
+            threadState.put(streamThread.getId(), streamThread.state());
+        }
     }
 
-    final class DelegatingStateRestoreListener implements StateRestoreListener {
+    static final class DelegatingStateRestoreListener implements StateRestoreListener {
+        private StateRestoreListener userStateRestoreListener;
+
         private void throwOnFatalException(final Exception fatalUserException,
                                            final TopicPartition topicPartition,
                                            final String storeName) {
@@ -483,14 +716,18 @@ public class KafkaStreams {
                     fatalUserException);
         }
 
+        void setUserStateRestoreListener(final StateRestoreListener userStateRestoreListener) {
+            this.userStateRestoreListener = userStateRestoreListener;
+        }
+
         @Override
         public void onRestoreStart(final TopicPartition topicPartition,
                                    final String storeName,
                                    final long startingOffset,
                                    final long endingOffset) {
-            if (globalStateRestoreListener != null) {
+            if (userStateRestoreListener != null) {
                 try {
-                    globalStateRestoreListener.onRestoreStart(topicPartition, storeName, startingOffset, endingOffset);
+                    userStateRestoreListener.onRestoreStart(topicPartition, storeName, startingOffset, endingOffset);
                 } catch (final Exception fatalUserException) {
                     throwOnFatalException(fatalUserException, topicPartition, storeName);
                 }
@@ -502,9 +739,9 @@ public class KafkaStreams {
                                     final String storeName,
                                     final long batchEndOffset,
                                     final long numRestored) {
-            if (globalStateRestoreListener != null) {
+            if (userStateRestoreListener != null) {
                 try {
-                    globalStateRestoreListener.onBatchRestored(topicPartition, storeName, batchEndOffset, numRestored);
+                    userStateRestoreListener.onBatchRestored(topicPartition, storeName, batchEndOffset, numRestored);
                 } catch (final Exception fatalUserException) {
                     throwOnFatalException(fatalUserException, topicPartition, storeName);
                 }
@@ -513,13 +750,77 @@ public class KafkaStreams {
 
         @Override
         public void onRestoreEnd(final TopicPartition topicPartition, final String storeName, final long totalRestored) {
-            if (globalStateRestoreListener != null) {
+            if (userStateRestoreListener != null) {
                 try {
-                    globalStateRestoreListener.onRestoreEnd(topicPartition, storeName, totalRestored);
+                    userStateRestoreListener.onRestoreEnd(topicPartition, storeName, totalRestored);
                 } catch (final Exception fatalUserException) {
                     throwOnFatalException(fatalUserException, topicPartition, storeName);
                 }
             }
+        }
+
+        @Override
+        public void onRestoreSuspended(final TopicPartition topicPartition, final String storeName, final long totalRestored) {
+            if (userStateRestoreListener != null) {
+                try {
+                    userStateRestoreListener.onRestoreSuspended(topicPartition, storeName, totalRestored);
+                } catch (final Exception fatalUserException) {
+                    throwOnFatalException(fatalUserException, topicPartition, storeName);
+                }
+            }
+        }
+    }
+
+    static final class DelegatingStandbyUpdateListener implements StandbyUpdateListener {
+        private StandbyUpdateListener userStandbyListener;
+
+        private void throwOnFatalException(final Exception fatalUserException,
+                                           final TopicPartition topicPartition,
+                                           final String storeName) {
+            throw new StreamsException(
+                    String.format("Fatal user code error in standby update listener for store %s, partition %s.",
+                            storeName,
+                            topicPartition),
+                    fatalUserException);
+        }
+
+        @Override
+        public void onUpdateStart(final TopicPartition topicPartition,
+                          final String storeName,
+                          final long startingOffset) {
+            if (userStandbyListener != null) {
+                try {
+                    userStandbyListener.onUpdateStart(topicPartition, storeName, startingOffset);
+                } catch (final Exception fatalUserException) {
+                    throwOnFatalException(fatalUserException, topicPartition, storeName);
+                }
+            }
+        }
+
+        @Override
+        public void onBatchLoaded(final TopicPartition topicPartition, final String storeName, final TaskId taskId, final long batchEndOffset, final long batchSize, final long currentEndOffset) {
+            if (userStandbyListener != null) {
+                try {
+                    userStandbyListener.onBatchLoaded(topicPartition, storeName, taskId, batchEndOffset, batchSize, currentEndOffset);
+                } catch (final Exception fatalUserException) {
+                    throwOnFatalException(fatalUserException, topicPartition, storeName);
+                }
+            }
+        }
+
+        @Override
+        public void onUpdateSuspended(final TopicPartition topicPartition, final String storeName, final long storeOffset, final long currentEndOffset, final SuspendReason reason) {
+            if (userStandbyListener != null) {
+                try {
+                    userStandbyListener.onUpdateSuspended(topicPartition, storeName, storeOffset, currentEndOffset, reason);
+                } catch (final Exception fatalUserException) {
+                    throwOnFatalException(fatalUserException, topicPartition, storeName);
+                }
+            }
+        }
+
+        void setUserStandbyListener(final StandbyUpdateListener userStandbyListener) {
+            this.userStandbyListener = userStandbyListener;
         }
     }
 
@@ -535,7 +836,7 @@ public class KafkaStreams {
      */
     public KafkaStreams(final Topology topology,
                         final Properties props) {
-        this(topology.internalTopologyBuilder, new StreamsConfig(props), new DefaultKafkaClientSupplier());
+        this(topology, new StreamsConfig(props));
     }
 
     /**
@@ -553,7 +854,7 @@ public class KafkaStreams {
     public KafkaStreams(final Topology topology,
                         final Properties props,
                         final KafkaClientSupplier clientSupplier) {
-        this(topology.internalTopologyBuilder, new StreamsConfig(props), clientSupplier, Time.SYSTEM);
+        this(topology, new StreamsConfig(props), clientSupplier, Time.SYSTEM);
     }
 
     /**
@@ -567,10 +868,11 @@ public class KafkaStreams {
      * @param time           {@code Time} implementation; cannot be null
      * @throws StreamsException if any fatal error occurs
      */
+    @SuppressKafkaInternalApiUsage("KIP-1265: ctor leaks internal Time for test injection — pending KIP review to promote Time or refactor")
     public KafkaStreams(final Topology topology,
                         final Properties props,
                         final Time time) {
-        this(topology.internalTopologyBuilder, new StreamsConfig(props), new DefaultKafkaClientSupplier(), time);
+        this(topology, new StreamsConfig(props), time);
     }
 
     /**
@@ -586,178 +888,617 @@ public class KafkaStreams {
      * @param time           {@code Time} implementation; cannot be null
      * @throws StreamsException if any fatal error occurs
      */
+    @SuppressKafkaInternalApiUsage("KIP-1265: ctor leaks internal Time for test injection — pending KIP review to promote Time or refactor")
     public KafkaStreams(final Topology topology,
                         final Properties props,
                         final KafkaClientSupplier clientSupplier,
                         final Time time) {
-        this(topology.internalTopologyBuilder, new StreamsConfig(props), clientSupplier, time);
+        this(topology, new StreamsConfig(props), clientSupplier, time);
     }
 
     /**
-     * @deprecated use {@link #KafkaStreams(Topology, Properties)} instead
+     * Create a {@code KafkaStreams} instance.
+     * <p>
+     * Note: even if you never call {@link #start()} on a {@code KafkaStreams} instance,
+     * you still must {@link #close()} it to avoid resource leaks.
+     *
+     * @param topology  the topology specifying the computational logic
+     * @param applicationConfigs    configs for Kafka Streams
+     * @throws StreamsException if any fatal error occurs
      */
-    @Deprecated
     public KafkaStreams(final Topology topology,
-                        final StreamsConfig config) {
-        this(topology, config, new DefaultKafkaClientSupplier());
+                        final StreamsConfig applicationConfigs) {
+        this(topology, applicationConfigs, applicationConfigs.getKafkaClientSupplier());
     }
 
     /**
-     * @deprecated use {@link #KafkaStreams(Topology, Properties, KafkaClientSupplier)} instead
+     * Create a {@code KafkaStreams} instance.
+     * <p>
+     * Note: even if you never call {@link #start()} on a {@code KafkaStreams} instance,
+     * you still must {@link #close()} it to avoid resource leaks.
+     *
+     * @param topology       the topology specifying the computational logic
+     * @param applicationConfigs         configs for Kafka Streams
+     * @param clientSupplier the Kafka clients supplier which provides underlying producer and consumer clients
+     *                       for the new {@code KafkaStreams} instance
+     * @throws StreamsException if any fatal error occurs
      */
-    @Deprecated
     public KafkaStreams(final Topology topology,
-                        final StreamsConfig config,
+                        final StreamsConfig applicationConfigs,
                         final KafkaClientSupplier clientSupplier) {
-        this(topology.internalTopologyBuilder, config, clientSupplier);
+        this(new TopologyMetadata(topology.internalTopologyBuilder, applicationConfigs), applicationConfigs, clientSupplier);
     }
 
     /**
-     * @deprecated use {@link #KafkaStreams(Topology, Properties, Time)} instead
+     * Create a {@code KafkaStreams} instance.
+     * <p>
+     * Note: even if you never call {@link #start()} on a {@code KafkaStreams} instance,
+     * you still must {@link #close()} it to avoid resource leaks.
+     *
+     * @param topology       the topology specifying the computational logic
+     * @param applicationConfigs         configs for Kafka Streams
+     * @param time           {@code Time} implementation; cannot be null
+     * @throws StreamsException if any fatal error occurs
      */
-    @Deprecated
+    @SuppressKafkaInternalApiUsage("KIP-1265: ctor leaks internal Time for test injection — pending KIP review to promote Time or refactor")
     public KafkaStreams(final Topology topology,
-                        final StreamsConfig config,
+                        final StreamsConfig applicationConfigs,
                         final Time time) {
-        this(topology.internalTopologyBuilder, config, new DefaultKafkaClientSupplier(), time);
+        this(new TopologyMetadata(topology.internalTopologyBuilder, applicationConfigs), applicationConfigs, applicationConfigs.getKafkaClientSupplier(), time);
     }
 
-    private KafkaStreams(final InternalTopologyBuilder internalTopologyBuilder,
-                         final StreamsConfig config,
-                         final KafkaClientSupplier clientSupplier) throws StreamsException {
-        this(internalTopologyBuilder, config, clientSupplier, Time.SYSTEM);
-    }
-
-    private KafkaStreams(final InternalTopologyBuilder internalTopologyBuilder,
-                         final StreamsConfig config,
+    private KafkaStreams(final Topology topology,
+                         final StreamsConfig applicationConfigs,
                          final KafkaClientSupplier clientSupplier,
                          final Time time) throws StreamsException {
-        this.config = config;
+        this(new TopologyMetadata(topology.internalTopologyBuilder, applicationConfigs), applicationConfigs, clientSupplier, time);
+    }
+
+    @SuppressKafkaInternalApiUsage("KIP-1265: protected ctor takes internal TopologyMetadata as a subclass extension point — pending KIP review to promote the type or refactor")
+    protected KafkaStreams(final TopologyMetadata topologyMetadata,
+                           final StreamsConfig applicationConfigs,
+                           final KafkaClientSupplier clientSupplier) throws StreamsException {
+        this(topologyMetadata, applicationConfigs, clientSupplier, Time.SYSTEM);
+    }
+
+    @SuppressWarnings("this-escape")
+    private KafkaStreams(final TopologyMetadata topologyMetadata,
+                         final StreamsConfig applicationConfigs,
+                         final KafkaClientSupplier clientSupplier,
+                         final Time time) throws StreamsException {
+        this.applicationConfigs = applicationConfigs;
         this.time = time;
 
-        // adjust the topology if optimization is turned on.
-        // TODO: to be removed post 2.0
-        internalTopologyBuilder.adjust(config);
+        this.topologyMetadata = topologyMetadata;
+        this.topologyMetadata.buildAndRewriteTopology();
+
+        final boolean hasGlobalTopology = topologyMetadata.hasGlobalTopology();
+
+        try {
+            stateDirectory = new StateDirectory(applicationConfigs, time, topologyMetadata.hasPersistentStores(), topologyMetadata.hasNamedTopologies());
+            processId = stateDirectory.initializeProcessId();
+        } catch (final ProcessorStateException fatal) {
+            Utils.closeQuietly(stateDirectory, "streams state directory");
+            throw new StreamsException(fatal);
+        }
 
         // The application ID is a required config and hence should always have value
-        processId = UUID.randomUUID();
-        final String userClientId = config.getString(StreamsConfig.CLIENT_ID_CONFIG);
-        final String applicationId = config.getString(StreamsConfig.APPLICATION_ID_CONFIG);
-        if (userClientId.length() <= 0) {
+        final String userClientId = applicationConfigs.getString(StreamsConfig.CLIENT_ID_CONFIG);
+        final String applicationId = applicationConfigs.getString(StreamsConfig.APPLICATION_ID_CONFIG);
+        if (userClientId.isEmpty()) {
             clientId = applicationId + "-" + processId;
         } else {
             clientId = userClientId;
         }
-
-        final LogContext logContext = new LogContext(String.format("stream-client [%s] ", clientId));
+        logContext = new LogContext(String.format("stream-client [%s] ", clientId));
         this.log = logContext.logger(getClass());
+        topologyMetadata.setLog(logContext);
 
-        try {
-            stateDirectory = new StateDirectory(config, time);
-        } catch (final ProcessorStateException fatal) {
-            throw new StreamsException(fatal);
+        this.clientSupplier = clientSupplier;
+
+        log.info("Kafka Streams version: {}", ClientMetrics.version());
+        log.info("Kafka Streams commit ID: {}", ClientMetrics.commitId());
+
+        throwIfUnsupportedFeatureIsUsedWithStreamsRebalanceProtocol();
+
+        // use client id instead of thread client id since this admin client may be shared among threads
+        adminClient = clientSupplier.getAdmin(applicationConfigs.getAdminConfigs(ClientUtils.adminClientId(clientId)));
+
+        metrics = createMetrics(applicationConfigs, time, clientId);
+        final StreamsClientMetricsDelegatingReporter reporter = new StreamsClientMetricsDelegatingReporter(adminClient, clientId);
+        metrics.addReporter(reporter);
+
+        streamsMetrics = new StreamsMetricsImpl(
+            metrics,
+            clientId,
+            time
+        );
+
+        ClientMetrics.addVersionMetric(streamsMetrics);
+        ClientMetrics.addCommitIdMetric(streamsMetrics);
+        ClientMetrics.addApplicationIdMetric(streamsMetrics, applicationConfigs.getString(StreamsConfig.APPLICATION_ID_CONFIG));
+        ClientMetrics.addTopologyDescriptionMetric(streamsMetrics, (metricsConfig, now) -> this.topologyMetadata.topologyDescriptionString());
+        ClientMetrics.addStateMetric(streamsMetrics, (metricsConfig, now) -> state.name());
+        ClientMetrics.addClientStateTelemetryMetric(processId.toString(), applicationId, streamsMetrics, (metricsConfig, now) -> state.ordinal());
+        ClientMetrics.addClientRecordingLevelMetric(processId.toString(), streamsMetrics, calculateMetricsRecordingLevel());
+        threads = Collections.synchronizedList(new LinkedList<>());
+        ClientMetrics.addNumAliveStreamThreadMetric(streamsMetrics, (metricsConfig, now) -> numLiveStreamThreads());
+
+        streamsMetadataState = new StreamsMetadataState(
+            this.topologyMetadata,
+            parseHostInfo(applicationConfigs.getString(StreamsConfig.APPLICATION_SERVER_CONFIG)),
+            logContext
+        );
+        streamsUncaughtExceptionHandler = (throwable, skipThreadReplacement) -> handleStreamsUncaughtException(throwable, t -> SHUTDOWN_CLIENT, skipThreadReplacement);
+        delegatingStateRestoreListener = new DelegatingStateRestoreListener();
+        delegatingStandbyUpdateListener = new DelegatingStandbyUpdateListener();
+
+        totalCacheSize = totalCacheSize(applicationConfigs);
+        final int numStreamThreads = topologyMetadata.numStreamThreads(applicationConfigs);
+        final long cacheSizePerThread = cacheSizePerThread(numStreamThreads);
+        final long maxUncommittedBytesPerThread = maxUncommittedBytesPerThread(numStreamThreads);
+
+        GlobalStreamThread.State globalThreadState = null;
+        if (hasGlobalTopology) {
+            final String globalThreadId = clientId + "-GlobalStreamThread";
+            globalStreamThread = new GlobalStreamThread(
+                topologyMetadata.globalTaskTopology(),
+                applicationConfigs,
+                clientSupplier.getGlobalConsumer(applicationConfigs.getGlobalConsumerConfigs(clientId)),
+                stateDirectory,
+                cacheSizePerThread,
+                maxUncommittedBytesPerThread,
+                streamsMetrics,
+                time,
+                globalThreadId,
+                delegatingStateRestoreListener,
+                exception -> handleStreamsUncaughtException(exception, t -> SHUTDOWN_CLIENT, false)
+            );
+            globalThreadState = globalStreamThread.state();
         }
 
+        streamStateListener = new StreamStateListener(globalThreadState);
+
+        final GlobalStateStoreProvider globalStateStoreProvider = new GlobalStateStoreProvider(this.topologyMetadata.globalStateStores());
+
+        if (hasGlobalTopology) {
+            globalStreamThread.setStateListener(streamStateListener);
+        }
+
+        queryableStoreProvider = new QueryableStoreProvider(
+            globalStateStoreProvider,
+            applicationConfigs::defaultInteractiveQueryIsolationLevel);
+        for (int i = 1; i <= numStreamThreads; i++) {
+            createAndAddStreamThread(cacheSizePerThread, maxUncommittedBytesPerThread, i);
+        }
+
+        stateDirCleaner = setupStateDirCleaner();
+        rocksDBMetricsRecordingService = maybeCreateRocksDBMetricsRecordingService(clientId, applicationConfigs);
+    }
+
+    private void throwIfUnsupportedFeatureIsUsedWithStreamsRebalanceProtocol() {
+        if (applicationConfigs.isStreamsProtocolEnabled()) {
+            log.info("Streams rebalance protocol enabled");
+            if (topologyMetadata.hasNamedTopologies()) {
+                throw new UnsupportedOperationException("Named topologies are not supported with the STREAMS protocol.");
+            }
+            if (topologyMetadata.usesPatternSubscription()) {
+                throw new UnsupportedOperationException("Pattern subscriptions are not supported with the STREAMS protocol.");
+            }
+            if (!(clientSupplier instanceof DefaultKafkaClientSupplier)) {
+                log.warn("A non-default kafka client supplier was supplied. Note that supplying a custom main consumer" +
+                    " is not supported with the STREAMS protocol.");
+            }
+        }
+    }
+
+    private StreamThread createAndAddStreamThread(final long cacheSizePerThread,
+                                                  final long maxUncommittedBytesPerThread,
+                                                  final int threadIdx) {
+        final StreamThread streamThread = StreamThread.create(
+            topologyMetadata,
+            applicationConfigs,
+            clientSupplier,
+            adminClient,
+            processId,
+            clientId,
+            streamsMetrics,
+            time,
+            streamsMetadataState,
+            cacheSizePerThread,
+            maxUncommittedBytesPerThread,
+            stateDirectory,
+            delegatingStateRestoreListener,
+            delegatingStandbyUpdateListener,
+            threadIdx,
+            KafkaStreams.this::closeToError,
+            streamsUncaughtExceptionHandler
+        );
+        streamStateListener.registerStreamThread(streamThread);
+        streamThread.setStateListener(streamStateListener);
+        threads.add(streamThread);
+        queryableStoreProvider.addStoreProviderForThread(streamThread.getName(), new StreamThreadStateStoreProvider(streamThread));
+        return streamThread;
+    }
+
+    private static Metrics createMetrics(final StreamsConfig config, final Time time, final String clientId) {
         final MetricConfig metricConfig = new MetricConfig()
             .samples(config.getInt(StreamsConfig.METRICS_NUM_SAMPLES_CONFIG))
             .recordLevel(Sensor.RecordingLevel.forName(config.getString(StreamsConfig.METRICS_RECORDING_LEVEL_CONFIG)))
             .timeWindow(config.getLong(StreamsConfig.METRICS_SAMPLE_WINDOW_MS_CONFIG), TimeUnit.MILLISECONDS);
-        final List<MetricsReporter> reporters = config.getConfiguredInstances(StreamsConfig.METRIC_REPORTER_CLASSES_CONFIG,
-                MetricsReporter.class);
-        reporters.add(new JmxReporter(JMX_PREFIX));
-        metrics = new Metrics(metricConfig, reporters, time);
+        final List<MetricsReporter> reporters = CommonClientConfigs.metricsReporters(clientId, config);
 
-        internalTopologyBuilder.setApplicationId(applicationId);
+        final MetricsContext metricsContext = new KafkaMetricsContext(JMX_PREFIX,
+                                                                      config.originalsWithPrefix(CommonClientConfigs.METRICS_CONTEXT_PREFIX));
+        return new Metrics(metricConfig, reporters, time, metricsContext);
+    }
 
-        // sanity check to fail-fast in case we cannot build a ProcessorTopology due to an exception
-        internalTopologyBuilder.build();
-
-        streamsMetadataState = new StreamsMetadataState(
-                internalTopologyBuilder,
-                parseHostInfo(config.getString(StreamsConfig.APPLICATION_SERVER_CONFIG)));
-
-        // create the stream thread, global update thread, and cleanup thread
-        threads = new StreamThread[config.getInt(StreamsConfig.NUM_STREAM_THREADS_CONFIG)];
-
-        long totalCacheSize = config.getLong(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG);
-        if (totalCacheSize < 0) {
-            totalCacheSize = 0;
-            log.warn("Negative cache size passed in. Reverting to cache size of 0 bytes.");
-        }
-        final ProcessorTopology globalTaskTopology = internalTopologyBuilder.buildGlobalStateTopology();
-        final long cacheSizePerThread = totalCacheSize / (threads.length + (globalTaskTopology == null ? 0 : 1));
-
-        final StateRestoreListener delegatingStateRestoreListener = new DelegatingStateRestoreListener();
-        GlobalStreamThread.State globalThreadState = null;
-        if (globalTaskTopology != null) {
-            final String globalThreadId = clientId + "-GlobalStreamThread";
-            globalStreamThread = new GlobalStreamThread(globalTaskTopology,
-                                                        config,
-                                                        clientSupplier.getGlobalConsumer(config.getGlobalConsumerConfigs(clientId)),
-                                                        stateDirectory,
-                                                        cacheSizePerThread,
-                                                        metrics,
-                                                        time,
-                                                        globalThreadId,
-                                                        delegatingStateRestoreListener);
-            globalThreadState = globalStreamThread.state();
-        }
-
-        // use client id instead of thread client id since this admin client may be shared among threads
-        adminClient = clientSupplier.getAdminClient(config.getAdminConfigs(clientId));
-
-        final Map<Long, StreamThread.State> threadState = new HashMap<>(threads.length);
-        final ArrayList<StateStoreProvider> storeProviders = new ArrayList<>();
-        for (int i = 0; i < threads.length; i++) {
-            threads[i] = StreamThread.create(internalTopologyBuilder,
-                                             config,
-                                             clientSupplier,
-                                             adminClient,
-                                             processId,
-                                             clientId,
-                                             metrics,
-                                             time,
-                                             streamsMetadataState,
-                                             cacheSizePerThread,
-                                             stateDirectory,
-                                             delegatingStateRestoreListener);
-            threadState.put(threads[i].getId(), threads[i].state());
-            storeProviders.add(new StreamThreadStateStoreProvider(threads[i]));
-        }
-
-        final StreamStateListener streamStateListener = new StreamStateListener(threadState, globalThreadState);
-        if (globalTaskTopology != null) {
-            globalStreamThread.setStateListener(streamStateListener);
-        }
-        for (StreamThread thread : threads) {
-            thread.setStateListener(streamStateListener);
-        }
-
-        final GlobalStateStoreProvider globalStateStoreProvider = new GlobalStateStoreProvider(internalTopologyBuilder.globalStateStores());
-        queryableStoreProvider = new QueryableStoreProvider(storeProviders, globalStateStoreProvider);
-
-        stateDirCleaner = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-            @Override
-            public Thread newThread(final Runnable r) {
-                final Thread thread = new Thread(r, clientId + "-CleanupThread");
-                thread.setDaemon(true);
-                return thread;
+    /**
+     * Adds and starts a stream thread in addition to the stream threads that are already running in this
+     * Kafka Streams client.
+     * <p>
+     * Since the number of stream threads increases, the sizes of the caches in the new stream thread
+     * and the existing stream threads are adapted so that the sum of the cache sizes over all stream
+     * threads does not exceed the total cache size specified in configuration
+     * {@link StreamsConfig#STATESTORE_CACHE_MAX_BYTES_CONFIG}.
+     * <p>
+     * Stream threads can only be added if this Kafka Streams client is in state RUNNING or REBALANCING.
+     *
+     * @return name of the added stream thread or empty if a new stream thread could not be added
+     */
+    public Optional<String> addStreamThread() {
+        if (isRunningOrRebalancing()) {
+            final StreamThread streamThread;
+            synchronized (changeThreadCount) {
+                final int threadIdx = nextThreadIndex();
+                final int numLiveThreads = numLiveStreamThreads();
+                final long cacheSizePerThread = cacheSizePerThread(numLiveThreads + 1);
+                final long maxUncommittedBytesPerThread = maxUncommittedBytesPerThread(numLiveThreads + 1);
+                log.info("Adding StreamThread-{}, there will now be {} live threads and the new cache size per thread is {}",
+                         threadIdx, numLiveThreads + 1, cacheSizePerThread);
+                resizeThreadCache(cacheSizePerThread);
+                resizeMaxUncommittedBytes(maxUncommittedBytesPerThread);
+                // Creating thread should hold the lock in order to avoid duplicate thread index.
+                // If the duplicate index happen, the metadata of thread may be duplicate too.
+                streamThread = createAndAddStreamThread(cacheSizePerThread, maxUncommittedBytesPerThread, threadIdx);
             }
+
+            synchronized (stateLock) {
+                if (isRunningOrRebalancing()) {
+                    streamThread.start();
+                    return Optional.of(streamThread.getName());
+                } else {
+                    log.warn("Terminating the new thread because the Kafka Streams client is in state {}", state);
+                    // The return value is deliberately ignored: this thread is still in CREATED, so the only
+                    // other caller that can have requested its shutdown first is close(), and whichever
+                    // caller wins completes the shutdown itself. The bookkeeping below is correct either way.
+                    streamThread.shutdown(GroupMembershipOperation.LEAVE_GROUP);
+                    threads.remove(streamThread);
+                    final long cacheSizePerThread = cacheSizePerThread(numLiveStreamThreads());
+                    log.info("Resizing thread cache due to terminating added thread, new cache size per thread is {}", cacheSizePerThread);
+                    resizeThreadCache(cacheSizePerThread);
+                    resizeMaxUncommittedBytes(maxUncommittedBytesPerThread(numLiveStreamThreads()));
+                    return Optional.empty();
+                }
+            }
+        } else {
+            log.warn("Cannot add a stream thread when Kafka Streams client is in state {}", state);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Removes one stream thread out of the running stream threads from this Kafka Streams client.
+     * <p>
+     * The removed stream thread is gracefully shut down. This method does not specify which stream
+     * thread is shut down.
+     * <p>
+     * The consumer associated with the stream thread is closed using consumer.close() during the shutdown process.
+     * Note that this method does not guarantee immediate removal of the consumer from the consumer group.
+     * The consumer is only kicked off from the group after the stream thread completes its run function.
+     * <p>
+     * Since the number of stream threads decreases, the sizes of the caches in the remaining stream
+     * threads are adapted so that the sum of the cache sizes over all stream threads equals the total
+     * cache size specified in configuration {@link StreamsConfig#STATESTORE_CACHE_MAX_BYTES_CONFIG}.
+     *
+     * @return name of the removed stream thread or empty if a stream thread could not be removed because
+     *         no stream threads are alive, or because every alive stream thread was already shutting
+     *         down (for example, being replaced after an uncaught exception)
+     */
+    public Optional<String> removeStreamThread() {
+        return removeStreamThread(Long.MAX_VALUE);
+    }
+
+    /**
+     * The consumer associated with the stream thread is closed using consumer.close() during the shutdown process.
+     * Note that this method does not guarantee immediate removal of the consumer from the consumer group.
+     * The consumer is only kicked off from the group after the stream thread completes its run function.
+     * <p>
+     * Since the number of stream threads decreases, the sizes of the caches in the remaining stream
+     * threads are adapted so that the sum of the cache sizes over all stream threads equals the total
+     * cache size specified in configuration {@link StreamsConfig#STATESTORE_CACHE_MAX_BYTES_CONFIG}.
+     *
+     * @param timeout The length of time to wait for the thread to shut down
+     * @return name of the removed stream thread or empty if a stream thread could not be removed because
+     *         no stream threads are alive, or because every alive stream thread was already shutting
+     *         down (for example, being replaced after an uncaught exception)
+     */
+    public Optional<String> removeStreamThread(final Duration timeout) {
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(timeout, "timeout");
+        final long timeoutMs = validateMillisecondDuration(timeout, msgPrefix);
+        return removeStreamThread(timeoutMs);
+    }
+
+    private Optional<String> removeStreamThread(final long timeoutMs) throws TimeoutException {
+        final long startMs = time.milliseconds();
+
+        if (!isRunningOrRebalancing()) {
+            log.warn("Cannot remove a stream thread when Kafka Streams client is in state {}", state());
+            return Optional.empty();
+        }
+
+        // Phase 1: choose a thread and signal its shutdown under the lock. We must not block
+        // on that thread's terminal state while holding `changeThreadCount`: if the thread
+        // being removed is the one that concurrently entered the REPLACE_THREAD
+        // uncaught-exception handler, its `replaceStreamThread -> addStreamThread` path is
+        // already blocked on this same lock, so it can never reach DEAD (only
+        // `completeShutdown` sets that state) and the wait below would never return.
+        final StreamThread threadToRemove;
+        boolean skippedThreadAlreadyShuttingDown = false;
+        synchronized (changeThreadCount) {
+            StreamThread candidate = null;
+            // Copy the threads list to avoid holding its intrinsic lock during iteration.
+            //
+            // `shutdown()` moves a thread to PENDING_SHUTDOWN synchronously while the underlying
+            // Thread stays alive until `run()` returns, so filtering on the Streams state (not
+            // Thread liveness alone) is what keeps two concurrent removals from picking the same
+            // thread.
+            //
+            // A thread in CREATED is removable only once started: `addStreamThread` publishes the
+            // thread to `threads` before starting it, and a thread that never ran cannot reach
+            // DEAD. A started thread stays in CREATED until `run()` begins executing, so Thread
+            // liveness covers that scheduling window; shutting such a thread down completes
+            // inline within shutdown().
+            for (final StreamThread streamThread : new ArrayList<>(threads)) {
+                final boolean isNotCurrentThread = !streamThread.getName().equals(Thread.currentThread().getName());
+                final StreamThread.State threadState = streamThread.state();
+                final boolean removable = threadState.isAlive()
+                    || (threadState == StreamThread.State.CREATED && streamThread.isThreadAlive());
+                if (removable && (isNotCurrentThread || numLiveStreamThreads() == 1)) {
+                    // shutdown() returns false if another caller requested this thread's shutdown
+                    // between the isAlive() check above and this call: either its uncaught-exception
+                    // handler, which will spawn a replacement, or a concurrent client close. In both
+                    // cases that caller owns the thread's death, so it must not count as this
+                    // removal; keep scanning for another candidate.
+                    if (streamThread.shutdown(GroupMembershipOperation.LEAVE_GROUP)) {
+                        log.info("Removing StreamThread {}", streamThread.getName());
+                        candidate = streamThread;
+                        break;
+                    }
+                    skippedThreadAlreadyShuttingDown = true;
+                }
+            }
+            threadToRemove = candidate;
+        }
+
+        if (threadToRemove == null) {
+            if (skippedThreadAlreadyShuttingDown) {
+                log.info("There are no threads eligible for removal: every alive thread is already shutting down, "
+                    + "either because it is being replaced after an uncaught exception or because the client is closing. "
+                    + "Retry to remove the replacement thread once it is running.");
+            } else {
+                log.info("There are no threads eligible for removal: no thread is in an alive state");
+            }
+            return Optional.empty();
+        }
+
+        final boolean callingThreadIsNotCurrentStreamThread =
+            !threadToRemove.getName().equals(Thread.currentThread().getName());
+
+        // Phase 2: wait for the thread to reach DEAD without holding `changeThreadCount`, so
+        // that a concurrent add or thread replacement can make progress in the meantime.
+        final boolean reachedDead;
+        if (callingThreadIsNotCurrentStreamThread) {
+            final long remainingTimeMs = timeoutMs - (time.milliseconds() - startMs);
+            reachedDead = remainingTimeMs > 0
+                && threadToRemove.waitOnThreadState(StreamThread.State.DEAD, remainingTimeMs);
+        } else {
+            log.info("{} is the last remaining thread and must remove itself, therefore we cannot wait "
+                + "for it to complete shutdown as this will result in deadlock.", threadToRemove.getName());
+            reachedDead = false;
+        }
+
+        // Phase 3: bookkeeping under the lock, so that the threads-list update is serialized
+        // against concurrent add and remove callers. The cache sizes are recomputed from
+        // `numLiveStreamThreads()`, which already excludes the PENDING_SHUTDOWN thread we
+        // signalled in phase 1; that is also why releasing the lock during the wait cannot make
+        // a concurrent `addStreamThread` size the caches against a stale thread count.
+        synchronized (changeThreadCount) {
+            if (callingThreadIsNotCurrentStreamThread) {
+                if (reachedDead) {
+                    log.info("Successfully removed {} in {}ms", threadToRemove.getName(), time.milliseconds() - startMs);
+                    threads.remove(threadToRemove);
+                    // While the wait above did not hold the lock, a concurrent addStreamThread may have
+                    // trimmed the DEAD thread via nextThreadIndex and reused its name, overwriting the
+                    // store-provider registration with the new thread's. The registrations are keyed by
+                    // name, so removing by name would delete the replacement's provider and break
+                    // interactive queries. Only a thread that can still serve queries counts as active
+                    // name reuse: a replacement already in PENDING_SHUTDOWN or DEAD serves none (its
+                    // provider throws InvalidStateStoreException or returns no stores), will be
+                    // trimmed from `threads`, and would leave its provider registered forever, so its
+                    // registration is cleaned up here like the removed thread's own.
+                    final String removedThreadName = threadToRemove.getName();
+                    final boolean nameReused = new ArrayList<>(threads).stream()
+                        .anyMatch(t -> {
+                            if (!t.getName().equals(removedThreadName)) {
+                                return false;
+                            }
+                            final StreamThread.State reusingThreadState = t.state();
+                            return reusingThreadState.isAlive() || reusingThreadState == StreamThread.State.CREATED;
+                        });
+                    if (nameReused) {
+                        log.info("Skipping state-store provider cleanup for {} since the name has been reused by a newly added thread",
+                            removedThreadName);
+                    } else {
+                        queryableStoreProvider.removeStoreProviderForThread(removedThreadName);
+                    }
+                } else {
+                    log.warn("{} did not shutdown in the allotted time.", threadToRemove.getName());
+                    // Don't remove from threads until shutdown is complete. We will trim it from the
+                    // list once it reaches DEAD, and if for some reason it's hanging indefinitely in the
+                    // shutdown then we should just consider this thread.id to be burned
+                }
+            }
+            final long cacheSizePerThread = cacheSizePerThread(numLiveStreamThreads());
+            log.info("Resizing thread cache due to thread removal, new cache size per thread is {}", cacheSizePerThread);
+            resizeThreadCache(cacheSizePerThread);
+            resizeMaxUncommittedBytes(maxUncommittedBytesPerThread(numLiveStreamThreads()));
+        }
+
+        if (callingThreadIsNotCurrentStreamThread && !reachedDead) {
+            throw new TimeoutException("Thread " + threadToRemove.getName() + " did not stop in the allotted time");
+        }
+        return Optional.of(threadToRemove.getName());
+    }
+
+    private int calculateMetricsRecordingLevel() {
+        final int recordingLevel;
+        final String recordingLevelString = applicationConfigs.getString(METRICS_RECORDING_LEVEL_CONFIG);
+        switch (recordingLevelString) {
+            case "INFO":
+                recordingLevel = 0;
+                break;
+            case "DEBUG":
+                recordingLevel = 1;
+                break;
+            case "TRACE":
+                recordingLevel = 2;
+                break;
+            default:
+                throw new IllegalArgumentException("Unexpected recording level: " + recordingLevelString);
+        }
+        return recordingLevel;
+    }
+
+    /*
+     * Takes a snapshot and counts the number of stream threads which are not in PENDING_SHUTDOWN or DEAD
+     *
+     * Note: iteration over SynchronizedList is not thread safe, so it must be manually synchronized. However, we may
+     * require other locks when looping threads, and it could cause deadlock. Hence, we create a copy to avoid holding
+     * threads lock when looping threads.
+     *
+     * @return number of alive stream threads
+     */
+    private int numLiveStreamThreads() {
+        final AtomicInteger numLiveThreads = new AtomicInteger(0);
+
+        synchronized (threads) {
+            processStreamThread(thread -> {
+                if (thread.state() == StreamThread.State.DEAD) {
+                    log.debug("Trimming thread {} from the threads list since it's state is {}", thread.getName(), StreamThread.State.DEAD);
+                    threads.remove(thread);
+                } else if (thread.state() == StreamThread.State.PENDING_SHUTDOWN) {
+                    log.debug("Skipping thread {} from num live threads computation since it's state is {}",
+                              thread.getName(), StreamThread.State.PENDING_SHUTDOWN);
+                } else {
+                    numLiveThreads.incrementAndGet();
+                }
+            });
+            return numLiveThreads.get();
+        }
+    }
+
+    private int nextThreadIndex() {
+        final HashSet<String> allLiveThreadNames = new HashSet<>();
+        final AtomicInteger maxThreadId = new AtomicInteger(1);
+        synchronized (threads) {
+            processStreamThread(thread -> {
+                // trim any DEAD threads from the list, so we can reuse the thread.id
+                // this is only safe to do once the thread has fully completed shutdown
+                if (thread.state() == StreamThread.State.DEAD) {
+                    threads.remove(thread);
+                } else {
+                    allLiveThreadNames.add(thread.getName());
+                    // Assume threads are always named with the "-StreamThread-<threadId>" suffix
+                    final int threadId = Integer.parseInt(thread.getName().substring(thread.getName().lastIndexOf("-") + 1));
+                    if (threadId > maxThreadId.get()) {
+                        maxThreadId.set(threadId);
+                    }
+                }
+            });
+
+            final String baseName = clientId + "-StreamThread-";
+            for (int i = 1; i <= maxThreadId.get(); i++) {
+                final String name = baseName + i;
+                if (!allLiveThreadNames.contains(name)) {
+                    return i;
+                }
+            }
+            // It's safe to use threads.size() rather than getNumLiveStreamThreads() to infer the number of threads
+            // here since we trimmed any DEAD threads earlier in this method while holding the lock
+            return threads.size() + 1;
+        }
+    }
+
+    private long cacheSizePerThread(final int numStreamThreads) {
+        if (numStreamThreads == 0) {
+            return totalCacheSize;
+        }
+        return totalCacheSize / (numStreamThreads + (topologyMetadata.hasGlobalTopology() ? 1 : 0));
+    }
+
+    private long maxUncommittedBytesPerThread(final int numStreamThreads) {
+        final long totalMax = applicationConfigs.getLong(StreamsConfig.STATESTORE_UNCOMMITTED_MAX_BYTES_CONFIG);
+        if (totalMax <= 0) {
+            return -1;
+        }
+        final int divisor = Math.max(numStreamThreads, 0) + (topologyMetadata.hasGlobalTopology() ? 1 : 0);
+        return divisor == 0 ? totalMax : totalMax / divisor;
+    }
+
+    private void resizeThreadCache(final long cacheSizePerThread) {
+        processStreamThread(thread -> thread.resizeCache(cacheSizePerThread));
+        if (globalStreamThread != null) {
+            globalStreamThread.resize(cacheSizePerThread);
+        }
+    }
+
+    private void resizeMaxUncommittedBytes(final long maxUncommittedBytesPerThread) {
+        processStreamThread(thread -> thread.resizeMaxUncommittedBytes(maxUncommittedBytesPerThread));
+        if (globalStreamThread != null) {
+            globalStreamThread.resizeMaxUncommittedBytes(maxUncommittedBytesPerThread);
+        }
+    }
+
+    private ScheduledExecutorService setupStateDirCleaner() {
+        return Executors.newSingleThreadScheduledExecutor(r -> {
+            final Thread thread = new Thread(r, clientId + "-CleanupThread");
+            // daemon: background cleanup must not block JVM shutdown
+            thread.setDaemon(true);
+            return thread;
         });
     }
 
+    private static ScheduledExecutorService maybeCreateRocksDBMetricsRecordingService(final String clientId,
+                                                                                      final StreamsConfig config) {
+        if (RecordingLevel.forName(config.getString(METRICS_RECORDING_LEVEL_CONFIG)) == RecordingLevel.DEBUG) {
+            return Executors.newSingleThreadScheduledExecutor(r -> {
+                final Thread thread = new Thread(r, clientId + "-RocksDBMetricsRecordingTrigger");
+                // daemon: background metrics recording must not block JVM shutdown
+                thread.setDaemon(true);
+                return thread;
+            });
+        }
+        return null;
+    }
+
     private static HostInfo parseHostInfo(final String endPoint) {
-        if (endPoint == null || endPoint.trim().isEmpty()) {
+        final HostInfo hostInfo = HostInfo.buildFromEndpoint(endPoint);
+        if (hostInfo == null) {
             return StreamsMetadataState.UNKNOWN_HOST;
+        } else {
+            return hostInfo;
         }
-        final String host = getHost(endPoint);
-        final Integer port = getPort(endPoint);
-
-        if (host == null || port == null) {
-            throw new ConfigException(String.format("Error parsing host address %s. Expected format host:port.", endPoint));
-        }
-
-        return new HostInfo(host, port);
     }
 
     /**
@@ -765,152 +1506,351 @@ public class KafkaStreams {
      * This function is expected to be called only once during the life cycle of the client.
      * <p>
      * Because threads are started in the background, this method does not block.
+     * However, if you have global stores in your topology, this method blocks until all global stores are restored.
      * As a consequence, any fatal exception that happens during processing is by default only logged.
      * If you want to be notified about dying threads, you can
-     * {@link #setUncaughtExceptionHandler(Thread.UncaughtExceptionHandler) register an uncaught exception handler}
+     * {@link #setUncaughtExceptionHandler(StreamsUncaughtExceptionHandler) register an uncaught exception handler}
      * before starting the {@code KafkaStreams} instance.
      * <p>
-     * Note, for brokers with version {@code 0.9.x} or lower, the broker version cannot be checked.
-     * There will be no error and the client will hang and retry to verify the broker version until it
-     * {@link StreamsConfig#REQUEST_TIMEOUT_MS_CONFIG times out}.
-
+     * <b>Note on broker compatibility:</b>
+     * <ul>
+     *   <li>Kafka Streams 4.x requires brokers on version 2.1 or higher. Connection attempts to
+     *       older brokers will fail due to unsupported protocol versions.</li>
+     *   <li>When {@link StreamsConfig#PROCESSING_GUARANTEE_CONFIG processing.guarantee} is set to
+     *       {@link StreamsConfig#EXACTLY_ONCE_V2 exactly_once_v2}, brokers must be version 2.5 or higher.
+     *       If the broker version is too old, the application will detect this during the first rebalance
+     *       and transition to {@link State#ERROR ERROR} state.</li>
+     * </ul>
+     * <p>
+     * Broker compatibility issues are typically detected asynchronously after {@code start()} returns.
+     * Use {@link #setStateListener(StateListener)} or
+     * {@link #setUncaughtExceptionHandler(StreamsUncaughtExceptionHandler)} to be notified of such failures.
+     *
      * @throws IllegalStateException if process was already started
-     * @throws StreamsException if the Kafka brokers have version 0.10.0.x or
-     *                          if {@link StreamsConfig#PROCESSING_GUARANTEE_CONFIG exactly-once} is enabled for pre 0.11.0.x brokers
+     * @throws StreamsException if the Kafka Streams instance has fatal error and cannot be restarted
+     *
+     * @see #setStateListener(StateListener)
+     * @see #setUncaughtExceptionHandler(StreamsUncaughtExceptionHandler)
      */
     public synchronized void start() throws IllegalStateException, StreamsException {
-        log.debug("Starting Streams client");
+        if (setState(State.REBALANCING)) {
+            final Long dirMaxAgeMs = applicationConfigs.getLong(StreamsConfig.STATE_CLEANUP_DIR_MAX_AGE_MS_CONFIG);
+            if (dirMaxAgeMs != StreamsConfig.STATE_CLEANUP_DIR_MAX_AGE_MS_DISABLED) {
+                log.debug("Start cleaning outdated directories");
+                stateDirectory.cleanOutdatedDirsOnStartup(dirMaxAgeMs);
+            }
+            log.debug("Initializing store offsets for existing local state");
+            stateDirectory.initializeStartupStores(topologyMetadata, logContext, streamsMetrics);
 
-        // first set state to RUNNING before kicking off the threads,
-        // making sure the state will always transit to RUNNING before REBALANCING
-        if (setRunningFromCreated()) {
+            log.debug("Starting Streams client");
+
             if (globalStreamThread != null) {
                 globalStreamThread.start();
             }
 
-            for (final StreamThread thread : threads) {
-                thread.start();
-            }
+            final int numThreads = processStreamThread(StreamThread::start);
 
-            final Long cleanupDelay = config.getLong(StreamsConfig.STATE_CLEANUP_DELAY_MS_CONFIG);
-            stateDirCleaner.scheduleAtFixedRate(new Runnable() {
-                @Override
-                public void run() {
-                    if (state == State.RUNNING) {
-                        stateDirectory.cleanRemovedTasks(cleanupDelay);
-                    }
+            log.info("Started {} stream threads", numThreads);
+
+            final Long cleanupDelay = applicationConfigs.getLong(StreamsConfig.STATE_CLEANUP_DELAY_MS_CONFIG);
+            stateDirCleaner.scheduleAtFixedRate(() -> {
+                // we do not use lock here since we only read on the value and act on it
+                if (state == State.RUNNING) {
+                    stateDirectory.cleanRemovedTasks(cleanupDelay);
                 }
             }, cleanupDelay, cleanupDelay, TimeUnit.MILLISECONDS);
 
-            log.info("Started Streams client");
+            final long recordingDelay = 0;
+            final long recordingInterval = 1;
+            if (rocksDBMetricsRecordingService != null) {
+                rocksDBMetricsRecordingService.scheduleAtFixedRate(
+                    streamsMetrics.rocksDBMetricsRecordingTrigger(),
+                    recordingDelay,
+                    recordingInterval,
+                    TimeUnit.MINUTES
+                );
+            }
         } else {
-            // if transition failed but no exception is thrown; currently it is not possible
-            // since we do not allow calling start multiple times whether or not it is already shutdown.
-            // TODO: In the future if we lift this restriction this code path could then be triggered and be updated
-            log.error("Already stopped, cannot re-start");
+            throw new IllegalStateException("The client is either already started or already stopped, cannot re-start");
+        }
+    }
+
+    /**
+     * Class that handles options passed in case of {@code KafkaStreams} instance scale down
+     */
+    @Deprecated(since = "4.2")
+    public static class CloseOptions {
+        private Duration timeout = Duration.ofMillis(Long.MAX_VALUE);
+        private boolean leaveGroup = false;
+
+        @Deprecated(since = "4.2")
+        public CloseOptions timeout(final Duration timeout) {
+            this.timeout = timeout;
+            return this;
+        }
+
+        @Deprecated(since = "4.2")
+        public CloseOptions leaveGroup(final boolean leaveGroup) {
+            this.leaveGroup = leaveGroup;
+            return this;
         }
     }
 
     /**
      * Shutdown this {@code KafkaStreams} instance by signaling all the threads to stop, and then wait for them to join.
      * This will block until all threads have stopped.
+     * <p>
+     * Uses {@link GroupMembershipOperation#DEFAULT DEFAULT} behavior,
+     * which adapts based on the active protocol:
+     * <ul>
+     *   <li>Classic protocol: the consumer remains in the group (no explicit leave).</li>
+     *   <li>Streams protocol ({@code group.protocol=streams}): dynamic members leave the group;
+     *       static members (with {@code group.instance.id}) remain in the group and are removed
+     *       by the broker after the session timeout.</li>
+     * </ul>
      */
     public void close() {
-        close(DEFAULT_CLOSE_TIMEOUT, TimeUnit.SECONDS);
+        close(Optional.empty(), GroupMembershipOperation.DEFAULT);
+    }
+
+    private Thread shutdownHelper(
+        final boolean error,
+        final long timeoutMs,
+        final GroupMembershipOperation operation
+    ) {
+        stateDirCleaner.shutdownNow();
+        if (rocksDBMetricsRecordingService != null) {
+            rocksDBMetricsRecordingService.shutdownNow();
+        }
+
+        // wait for all threads to join in a separate thread;
+        // save the current thread so that if it is a stream thread
+        // we don't attempt to join it and cause a deadlock
+        return new Thread(() -> {
+            // notify all the threads to stop; avoid deadlocks by stopping any
+            // further state reports from the thread since we're shutting down.
+            // The return value of shutdown() is deliberately ignored: a thread already shutting
+            // down keeps the group membership operation of whoever initiated its shutdown, and
+            // every thread is joined below regardless of who initiated it.
+            int numStreamThreads = processStreamThread(
+                streamThread -> streamThread.shutdown(operation)
+            );
+
+            log.info("Shutting down {} stream threads", numStreamThreads);
+
+            topologyMetadata.wakeupThreads();
+
+            numStreamThreads = processStreamThread(thread -> {
+                try {
+                    if (!thread.isRunning()) {
+                        log.debug("Shutdown {} complete", thread.getName());
+
+                        thread.join();
+                    }
+                } catch (final InterruptedException ex) {
+                    log.warn("Shutdown {} interrupted", thread.getName());
+
+                    Thread.currentThread().interrupt();
+                }
+            });
+
+            log.info("Shutdown {} stream threads complete", numStreamThreads);
+
+            if (globalStreamThread != null) {
+                log.info("Shutting down the global stream threads");
+
+                globalStreamThread.shutdown();
+            }
+
+            if (globalStreamThread != null && !globalStreamThread.stillRunning()) {
+                try {
+                    globalStreamThread.join();
+                } catch (final InterruptedException e) {
+                    log.warn("Shutdown the global stream thread interrupted");
+
+                    Thread.currentThread().interrupt();
+                }
+                globalStreamThread = null;
+
+                log.info("Shutdown global stream threads complete");
+            }
+
+            stateDirectory.close();
+            // passing in `timeoutMs` here is a quick fix to avoid blocking forever
+            // cf https://issues.apache.org/jira/browse/KAFKA-7996
+            if (timeoutMs >= 0) {
+                adminClient.close(Duration.ofMillis(timeoutMs));
+            } else {
+                adminClient.close();
+            }
+
+            streamsMetrics.removeAllClientLevelSensorsAndMetrics();
+            metrics.close();
+            if (!error) {
+                setState(State.NOT_RUNNING);
+            } else {
+                setState(State.ERROR);
+            }
+        }, clientId + "-CloseThread");
+    }
+
+    // visible for testing
+    boolean close(final Optional<Long> timeout, final GroupMembershipOperation operation) {
+        final long timeoutMs;
+        if (timeout.isPresent()) {
+            timeoutMs = timeout.get();
+            log.debug("Stopping Streams client with timeout = {}ms.", timeoutMs);
+        } else {
+            timeoutMs = Long.MAX_VALUE;
+        }
+
+        if (!setState(State.PENDING_SHUTDOWN)) {
+            // Copy the state so that we can atomically check if we are shut down and act on it (log it)
+            final State immutableStateCopy = state;
+            if (immutableStateCopy.isShuttingDown()) {
+                log.info("Skipping shutdown since Streams client is already in {}, waiting for a terminal state", immutableStateCopy);
+                if (!waitOnStates(timeoutMs, State.ERROR, State.NOT_RUNNING)) {
+                    log.warn("Streams client did transition to a terminal state (ERROR or NOT_RUNNING) within the {}ms timeout", timeoutMs);
+                    return false;
+                }
+                log.info("Streams client stopped completely and transitioned to the terminal {} state", state);
+                return true;
+            }
+
+            if (state.hasCompletedShutdown()) {
+                log.info("Skipping shutdown since Streams client is already in the terminal {} state", state);
+                return true;
+            }
+
+            throw new IllegalStateException("If transitioning to PENDING_SHUTDOWN fails, the state should be either in "
+                + "PENDING_SHUTDOWN, PENDING_ERROR, ERROR, or NOT_RUNNING");
+        }
+
+        final Thread shutdownThread = shutdownHelper(false, timeoutMs, operation);
+
+        // daemon: the shutdown thread itself must not prevent JVM exit
+        shutdownThread.setDaemon(true);
+        shutdownThread.start();
+
+        if (waitOnStates(timeoutMs, State.NOT_RUNNING)) {
+            log.info("Streams client stopped completely");
+            return true;
+        } else {
+            log.info("Streams client cannot stop completely within the {}ms timeout", timeoutMs);
+            return false;
+        }
+    }
+
+    void closeToError() {
+        if (!setState(State.PENDING_ERROR)) {
+            log.info("Skipping shutdown since we are already in {}", state());
+        } else {
+            final Thread shutdownThread = shutdownHelper(true, -1, GroupMembershipOperation.REMAIN_IN_GROUP);
+
+            // daemon: the shutdown thread itself must not prevent JVM exit
+            shutdownThread.setDaemon(true);
+            shutdownThread.start();
+        }
     }
 
     /**
      * Shutdown this {@code KafkaStreams} by signaling all the threads to stop, and then wait up to the timeout for the
      * threads to join.
-     * A {@code timeout} of 0 means to wait forever.
+     * A {@code timeout} of {@link Duration#ZERO} (or any other zero duration) makes the close operation asynchronous.
+     * Negative-duration timeouts are rejected.
+     * <p>
+     * Uses {@link GroupMembershipOperation#DEFAULT DEFAULT} behavior,
+     * which adapts based on the active protocol:
+     * <ul>
+     *   <li>Classic protocol: the consumer remains in the group (no explicit leave).</li>
+     *   <li>Streams protocol ({@code group.protocol=streams}): dynamic members leave the group;
+     *       static members (with {@code group.instance.id}) remain in the group and are removed
+     *       by the broker after the session timeout.</li>
+     * </ul>
      *
-     * @param timeout  how long to wait for the threads to shutdown
-     * @param timeUnit unit of time used for timeout
+     * @param timeout how long to wait for the threads to shut down
      * @return {@code true} if all threads were successfully stopped&mdash;{@code false} if the timeout was reached
      * before all threads stopped
-     * Note that this method must not be called in the {@code onChange} callback of {@link StateListener}.
+     * Note that this method must not be called in the {@link StateListener#onChange(KafkaStreams.State, KafkaStreams.State)} callback of {@link StateListener}.
+     * @throws IllegalArgumentException if {@code timeout} can't be represented as {@code long milliseconds}
      */
-    public synchronized boolean close(final long timeout, final TimeUnit timeUnit) {
-        log.debug("Stopping Streams client with timeoutMillis = {} ms.", timeUnit.toMillis(timeout));
-
-        if (!setState(State.PENDING_SHUTDOWN)) {
-            // if transition failed, it means it was either in PENDING_SHUTDOWN
-            // or NOT_RUNNING already; just check that all threads have been stopped
-            log.info("Already in the pending shutdown state, wait to complete shutdown");
-        } else {
-            stateDirCleaner.shutdownNow();
-
-            // wait for all threads to join in a separate thread;
-            // save the current thread so that if it is a stream thread
-            // we don't attempt to join it and cause a deadlock
-            final Thread shutdownThread = new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    // notify all the threads to stop; avoid deadlocks by stopping any
-                    // further state reports from the thread since we're shutting down
-                    for (final StreamThread thread : threads) {
-                        thread.setStateListener(null);
-                        thread.shutdown();
-                    }
-
-                    for (final StreamThread thread : threads) {
-                        try {
-                            if (!thread.isRunning()) {
-                                thread.join();
-                            }
-                        } catch (final InterruptedException ex) {
-                            Thread.currentThread().interrupt();
-                        }
-                    }
-
-                    if (globalStreamThread != null) {
-                        globalStreamThread.setStateListener(null);
-                        globalStreamThread.shutdown();
-                    }
-
-                    if (globalStreamThread != null && !globalStreamThread.stillRunning()) {
-                        try {
-                            globalStreamThread.join();
-                        } catch (final InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                        }
-                        globalStreamThread = null;
-                    }
-
-                    adminClient.close();
-
-                    metrics.close();
-                    setState(State.NOT_RUNNING);
-                }
-            }, "kafka-streams-close-thread");
-
-            shutdownThread.setDaemon(true);
-            shutdownThread.start();
+    public synchronized boolean close(final Duration timeout) throws IllegalArgumentException {
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(timeout, "timeout");
+        final long timeoutMs = validateMillisecondDuration(timeout, msgPrefix);
+        if (timeoutMs < 0) {
+            throw new IllegalArgumentException("Timeout can't be negative.");
         }
 
-        if (waitOnState(State.NOT_RUNNING, timeUnit.toMillis(timeout))) {
-            log.info("Streams client stopped completely");
-            return true;
-        } else {
-            log.info("Streams client cannot stop completely within the timeout");
-            return false;
-        }
+        return close(Optional.of(timeoutMs), GroupMembershipOperation.DEFAULT);
     }
 
     /**
-     * Do a clean up of the local {@link StateStore} directory ({@link StreamsConfig#STATE_DIR_CONFIG}) by deleting all
+     * Shutdown this {@code KafkaStreams} by signaling all the threads to stop, and then wait up to the timeout for the
+     * threads to join.
+     * This method is deprecated and replaced by {@link #close(org.apache.kafka.streams.CloseOptions)}.
+     * @param options  contains timeout to specify how long to wait for the threads to shut down, and a flag leaveGroup to
+     *                 trigger consumer leave call
+     * @return {@code true} if all threads were successfully stopped&mdash;{@code false} if the timeout was reached
+     * before all threads stopped
+     * Note that this method must not be called in the {@link StateListener#onChange(KafkaStreams.State, KafkaStreams.State)} callback of {@link StateListener}.
+     * @throws IllegalArgumentException if {@code timeout} can't be represented as {@code long milliseconds}
+     */
+    @Deprecated(since = "4.2")
+    public synchronized boolean close(final CloseOptions options) throws IllegalArgumentException {
+        final org.apache.kafka.streams.CloseOptions closeOptions = org.apache.kafka.streams.CloseOptions.timeout(options.timeout)
+                .withGroupMembershipOperation(options.leaveGroup ?
+                        GroupMembershipOperation.LEAVE_GROUP :
+                        GroupMembershipOperation.REMAIN_IN_GROUP);
+        return close(closeOptions);
+    }
+
+    /**
+     * Shutdown this {@code KafkaStreams} by signaling all the threads to stop, and then wait up to the timeout for the
+     * threads to join.
+     * @param options  contains timeout to specify how long to wait for the threads to shut down,
+     *                 and a {@link GroupMembershipOperation}
+     *                 to trigger consumer leave call or remain in the group
+     * @return {@code true} if all threads were successfully stopped&mdash;{@code false} if the timeout was reached
+     * before all threads stopped
+     * Note that this method must not be called in the {@link StateListener#onChange(KafkaStreams.State, KafkaStreams.State)} callback of {@link StateListener}.
+     * @throws IllegalArgumentException if {@code timeout} can't be represented as {@code long milliseconds}
+     */
+    public synchronized boolean close(final org.apache.kafka.streams.CloseOptions options) throws IllegalArgumentException {
+        Objects.requireNonNull(options, "options cannot be null");
+        final CloseOptionsInternal optionsInternal = new CloseOptionsInternal(options);
+        final Duration timeout = optionsInternal.timeout().orElseGet(() -> Duration.ofMillis(Long.MAX_VALUE));
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(timeout, "timeout");
+        final long timeoutMs = validateMillisecondDuration(timeout, msgPrefix);
+        if (timeoutMs < 0) {
+            throw new IllegalArgumentException("Timeout can't be negative.");
+        }
+
+        return close(Optional.of(timeoutMs), optionsInternal.operation());
+    }
+
+    /**
+     * Do a cleanup of the local {@link StateStore} directory ({@link StreamsConfig#STATE_DIR_CONFIG}) by deleting all
      * data with regard to the {@link StreamsConfig#APPLICATION_ID_CONFIG application ID}.
      * <p>
      * May only be called either before this {@code KafkaStreams} instance is {@link #start() started} or after the
      * instance is {@link #close() closed}.
      * <p>
      * Calling this method triggers a restore of local {@link StateStore}s on the next {@link #start() application start}.
+     * <p>
+     * As a final step, this method attempts to delete the application's state directory.
+     * If only expected metadata files remain, such as {@code kafka-streams-process-metadata}
+     * and/or {@code .lock}, the directory itself may be retained. This is not considered
+     * a cleanup failure.
+     * 
+     * <p>
+     * If a full local reset is required, including removal of persisted process metadata,
+     * manually delete the application's state directory after this instance has been closed.
      *
-     * @throws IllegalStateException if this {@code KafkaStreams} instance is currently {@link State#RUNNING running}
+     * @throws IllegalStateException if this {@code KafkaStreams} instance has been started and hasn't fully shut down
      * @throws StreamsException if cleanup failed
      */
     public void cleanUp() {
-        if (isRunning()) {
+        if (!(state.hasNotStarted() || state.hasCompletedShutdown())) {
             throw new IllegalStateException("Cannot clean up while running.");
         }
         stateDirectory.clean();
@@ -921,13 +1861,13 @@ public class KafkaStreams {
      * {@link StreamsConfig#APPLICATION_ID_CONFIG application ID} as this instance (i.e., all instances that belong to
      * the same Kafka Streams application) and return {@link StreamsMetadata} for each discovered instance.
      * <p>
-     * Note: this is a point in time view and it may change due to partition reassignment.
+     * Note: this is a point in time view, and it may change due to partition reassignment.
      *
      * @return {@link StreamsMetadata} for each {@code KafkaStreams} instances of this application
      */
-    public Collection<StreamsMetadata> allMetadata() {
-        validateIsRunning();
-        return streamsMetadataState.getAllMetadata();
+    public Collection<StreamsMetadata> metadataForAllStreamsClients() {
+        validateIsRunningOrRebalancing();
+        return streamsMetadataState.allMetadata();
     }
 
     /**
@@ -939,103 +1879,299 @@ public class KafkaStreams {
      * </ul>
      * and return {@link StreamsMetadata} for each discovered instance.
      * <p>
-     * Note: this is a point in time view and it may change due to partition reassignment.
+     * Note: this is a point in time view, and it may change due to partition reassignment.
      *
      * @param storeName the {@code storeName} to find metadata for
-     * @return {@link StreamsMetadata} for each {@code KafkaStreams} instances with the provide {@code storeName} of
+     * @return {@link StreamsMetadata} for each {@code KafkaStreams} instances with the provided {@code storeName} of
      * this application
      */
-    public Collection<StreamsMetadata> allMetadataForStore(final String storeName) {
-        validateIsRunning();
-        return streamsMetadataState.getAllMetadataForStore(storeName);
+    public Collection<StreamsMetadata> streamsMetadataForStore(final String storeName) {
+        validateIsRunningOrRebalancing();
+        return streamsMetadataState.allMetadataForStore(storeName);
     }
 
     /**
-     * Find the currently running {@code KafkaStreams} instance (potentially remotely) that
-     * <ul>
-     *   <li>use the same {@link StreamsConfig#APPLICATION_ID_CONFIG application ID} as this instance (i.e., all
-     *       instances that belong to the same Kafka Streams application)</li>
-     *   <li>and that contain a {@link StateStore} with the given {@code storeName}</li>
-     *   <li>and the {@link StateStore} contains the given {@code key}</li>
-     * </ul>
-     * and return {@link StreamsMetadata} for it.
+     * Finds the metadata containing the active hosts and standby hosts where the key being queried would reside,
+     * without requiring record headers to be provided.
      * <p>
-     * This will use the default Kafka Streams partitioner to locate the partition.
-     * If a {@link StreamPartitioner custom partitioner} has been
-     * {@link ProducerConfig#PARTITIONER_CLASS_CONFIG configured} via {@link StreamsConfig} or
-     * {@link KStream#through(String, Produced)}, or if the original {@link KTable}'s input
-     * {@link StreamsBuilder#table(String) topic} is partitioned differently, please use
-     * {@link #metadataForKey(String, Object, StreamPartitioner)}.
-     * <p>
-     * Note:
-     * <ul>
-     *   <li>this is a point in time view and it may change due to partition reassignment</li>
-     *   <li>the key may not exist in the {@link StateStore}; this method provides a way of finding which host it
-     *       <em>would</em> exist on</li>
-     *   <li>if this is for a window store the serializer should be the serializer for the record key,
-     *       not the window serializer</li>
-     * </ul>
+     * If your partitioner or serializer makes use of headers, use the {@link #queryMetadataForKey(String, Object, Headers, Serializer) Headers} overload, otherwise the returned metadata may not match where the key actually resides.
+     */
+    public <K> KeyQueryMetadata queryMetadataForKey(final String storeName,
+                                                    final K key,
+                                                    final Serializer<K> keySerializer) {
+        return queryMetadataForKey(storeName, key, new RecordHeaders(), keySerializer);
+    }
+
+    /**
+     * Finds the metadata containing the active hosts and standby hosts where the key being queried would reside.
      *
      * @param storeName     the {@code storeName} to find metadata for
      * @param key           the key to find metadata for
+     * @param headers       the record headers
      * @param keySerializer serializer for the key
      * @param <K>           key type
-     * @return {@link StreamsMetadata} for the {@code KafkaStreams} instance with the provide {@code storeName} and
-     * {@code key} of this application or {@link StreamsMetadata#NOT_AVAILABLE} if Kafka Streams is (re-)initializing
+     * Returns {@link KeyQueryMetadata} containing all metadata about hosting the given key for the given store,
+     * or {@code null} if no matching metadata could be found.
      */
-    public <K> StreamsMetadata metadataForKey(final String storeName,
-                                              final K key,
-                                              final Serializer<K> keySerializer) {
-        validateIsRunning();
-        return streamsMetadataState.getMetadataWithKey(storeName, key, keySerializer);
+    public <K> KeyQueryMetadata queryMetadataForKey(final String storeName,
+                                                    final K key,
+                                                    final Headers headers,
+                                                    final Serializer<K> keySerializer) {
+        validateIsRunningOrRebalancing();
+        return streamsMetadataState.keyQueryMetadataForKey(storeName, key, headers, keySerializer);
     }
 
     /**
-     * Find the currently running {@code KafkaStreams} instance (potentially remotely) that
-     * <ul>
-     *   <li>use the same {@link StreamsConfig#APPLICATION_ID_CONFIG application ID} as this instance (i.e., all
-     *       instances that belong to the same Kafka Streams application)</li>
-     *   <li>and that contain a {@link StateStore} with the given {@code storeName}</li>
-     *   <li>and the {@link StateStore} contains the given {@code key}</li>
-     * </ul>
-     * and return {@link StreamsMetadata} for it.
+     * Finds the metadata containing the active hosts and standby hosts where the key being queried would reside,
+     * using the supplied partitioner and without requiring record headers to be provided.
      * <p>
-     * Note:
-     * <ul>
-     *   <li>this is a point in time view and it may change due to partition reassignment</li>
-     *   <li>the key may not exist in the {@link StateStore}; this method provides a way of finding which host it
-     *       <em>would</em> exist on</li>
-     * </ul>
-     *
-     * @param storeName   the {@code storeName} to find metadata for
-     * @param key         the key to find metadata for
-     * @param partitioner the partitioner to be use to locate the host for the key
-     * @param <K>         key type
-     * @return {@link StreamsMetadata} for the {@code KafkaStreams} instance with the provide {@code storeName} and
-     * {@code key} of this application or {@link StreamsMetadata#NOT_AVAILABLE} if Kafka Streams is (re-)initializing
+     * If your partitioner or serializer makes use of headers, use the {@link #queryMetadataForKey(String, Object, Headers, StreamPartitioner) Headers} overload, otherwise the returned metadata may not match where the key actually resides.
      */
-    public <K> StreamsMetadata metadataForKey(final String storeName,
-                                              final K key,
-                                              final StreamPartitioner<? super K, ?> partitioner) {
-        validateIsRunning();
-        return streamsMetadataState.getMetadataWithKey(storeName, key, partitioner);
+    public <K> KeyQueryMetadata queryMetadataForKey(final String storeName,
+                                                    final K key,
+                                                    final StreamPartitioner<? super K, ?> partitioner) {
+        return queryMetadataForKey(storeName, key, new RecordHeaders(), partitioner);
     }
 
     /**
-     * Get a facade wrapping the local {@link StateStore} instances with the provided {@code storeName} if the Store's
-     * type is accepted by the provided {@link QueryableStoreType#accepts(StateStore) queryableStoreType}.
+     * Finds the metadata containing the active hosts and standby hosts where the key being queried would reside.
+     *
+     * @param storeName     the {@code storeName} to find metadata for
+     * @param key           the key to find metadata for
+     * @param headers       the record headers
+     * @param partitioner   the partitioner to be used to locate the host for the key
+     * @param <K>           key type
+     * Returns {@link KeyQueryMetadata} containing all metadata about hosting the given key for the given store, using
+     * the supplied partitioner, or {@code null} if no matching metadata could be found.
+     */
+    public <K> KeyQueryMetadata queryMetadataForKey(final String storeName,
+                                                    final K key,
+                                                    final Headers headers,
+                                                    final StreamPartitioner<? super K, ?> partitioner) {
+        validateIsRunningOrRebalancing();
+        return streamsMetadataState.keyQueryMetadataForKey(storeName, key, headers, partitioner);
+    }
+
+    /**
+     * Get a facade wrapping the local {@link StateStore} instances with the provided {@link StoreQueryParameters}.
      * The returned object can be used to query the {@link StateStore} instances.
      *
-     * @param storeName           name of the store to find
-     * @param queryableStoreType  accept only stores that are accepted by {@link QueryableStoreType#accepts(StateStore)}
-     * @param <T>                 return type
+     * @param storeQueryParameters   the parameters used to fetch a queryable store
      * @return A facade wrapping the local {@link StateStore} instances
-     * @throws InvalidStateStoreException if Kafka Streams is (re-)initializing or a store with {@code storeName} and
-     * {@code queryableStoreType} doesn't exist
+     * @throws StreamsNotStartedException If Streams has not yet been started. Just call {@link KafkaStreams#start()}
+     *                                    and then retry this call.
+     * @throws UnknownStateStoreException If the specified store name does not exist in the topology.
+     * @throws InvalidStateStorePartitionException If the specified partition does not exist.
+     * @throws InvalidStateStoreException If the Streams instance isn't in a queryable state.
+     *                                    If the store's type does not match the QueryableStoreType,
+     *                                    the Streams instance is not in a queryable state with respect
+     *                                    to the parameters, or if the store is not available locally, then
+     *                                    an InvalidStateStoreException is thrown upon store access.
      */
-    public <T> T store(final String storeName, final QueryableStoreType<T> queryableStoreType) {
-        validateIsRunning();
-        return queryableStoreProvider.getStore(storeName, queryableStoreType);
+    public <T> T store(final StoreQueryParameters<T> storeQueryParameters) {
+        validateIsRunningOrRebalancing();
+        final String storeName = storeQueryParameters.storeName();
+        if (!topologyMetadata.hasStore(storeName)) {
+            throw new UnknownStateStoreException(
+                "Cannot get state store " + storeName + " because no such store is registered in the topology."
+            );
+        }
+        return queryableStoreProvider.store(storeQueryParameters);
+    }
+
+    /**
+     *  This method pauses processing for the KafkaStreams instance.
+     *
+     *  <p>Paused topologies will only skip over (a) processing, (b) punctuation, and (c) standby tasks.
+     *  Notably, paused topologies will still poll Kafka consumers, and commit offsets.
+     *  This method sets transient state that is not maintained or managed among instances.
+     *  Note that pause() can be called before start() in order to start a KafkaStreams instance
+     *  in a manner where the processing is paused as described, but the consumers are started up.
+     */
+    @SuppressWarnings("deprecation")
+    public void pause() {
+        if (topologyMetadata.hasNamedTopologies()) {
+            for (final NamedTopology namedTopology : topologyMetadata.allNamedTopologies()) {
+                topologyMetadata.pauseTopology(namedTopology.name());
+            }
+        } else {
+            topologyMetadata.pauseTopology(UNNAMED_TOPOLOGY);
+        }
+    }
+
+    /**
+     * @return true when the KafkaStreams instance has its processing paused.
+     */
+    @SuppressWarnings("deprecation")
+    public boolean isPaused() {
+        if (topologyMetadata.hasNamedTopologies()) {
+            return topologyMetadata.allNamedTopologies().stream()
+                .map(NamedTopology::name)
+                .allMatch(topologyMetadata::isPaused);
+        } else {
+            return topologyMetadata.isPaused(UNNAMED_TOPOLOGY);
+        }
+    }
+
+    /**
+     * This method resumes processing for the KafkaStreams instance.
+     */
+    @SuppressWarnings("deprecation")
+    public void resume() {
+        if (topologyMetadata.hasNamedTopologies()) {
+            for (final NamedTopology namedTopology : topologyMetadata.allNamedTopologies()) {
+                topologyMetadata.resumeTopology(namedTopology.name());
+            }
+        } else {
+            topologyMetadata.resumeTopology(UNNAMED_TOPOLOGY);
+        }
+        threads.forEach(StreamThread::signalResume);
+    }
+
+    /**
+     * handle each stream thread in a snapshot of threads.
+     * noted: iteration over SynchronizedList is not thread safe, so it must be manually synchronized. However, we may
+     * require other locks when looping threads, and it could cause deadlock. Hence, we create a copy to avoid holding
+     * threads lock when looping threads.
+     * @param consumer handler
+     */
+    @SuppressKafkaInternalApiUsage("KIP-1265: protected method's signature exposes internal StreamThread for subclass access — pending KIP review to promote the type or refactor")
+    protected int processStreamThread(final Consumer<StreamThread> consumer) {
+        final List<StreamThread> copy = new ArrayList<>(threads);
+        for (final StreamThread thread : copy) consumer.accept(thread);
+
+        return copy.size();
+    }
+
+    /**
+     * Returns the internal clients' assigned {@code client instance ids}.
+     *
+     * @return The internal clients' assigned instance ids used for metrics collection.
+     *
+     * @throws IllegalArgumentException If {@code timeout} is negative.
+     * @throws IllegalStateException If {@code KafkaStreams} is not running.
+     * @throws TimeoutException Indicates that a request timed out.
+     * @throws StreamsException For any other error that might occur.
+     */
+    public synchronized ClientInstanceIds clientInstanceIds(final Duration timeout) {
+        if (timeout.isNegative()) {
+            throw new IllegalArgumentException("The timeout cannot be negative.");
+        }
+        if (state().hasNotStarted()) {
+            throw new IllegalStateException("KafkaStreams has not been started, you can retry after calling start().");
+        }
+        if (state().isShuttingDown() || state.hasCompletedShutdown()) {
+            throw new IllegalStateException("KafkaStreams has been stopped (" + state + ").");
+        }
+
+        final Timer remainingTime = time.timer(timeout.toMillis());
+        final ClientInstanceIdsImpl clientInstanceIds = new ClientInstanceIdsImpl();
+
+        // (1) fan-out calls to threads
+
+        // StreamThread for main/restore consumers and producer(s)
+        final Map<String, KafkaFuture<Uuid>> clientFutures = new HashMap<>();
+        synchronized (changeThreadCount) {
+            for (final StreamThread streamThread : threads) {
+                clientFutures.putAll(streamThread.clientInstanceIds(timeout));
+            }
+        }
+
+        // GlobalThread
+        KafkaFuture<Uuid> globalThreadFuture = null;
+        if (globalStreamThread != null) {
+            globalThreadFuture = globalStreamThread.globalConsumerInstanceId(timeout);
+        }
+
+        // (2) get admin client instance id in a blocking fashion, while Stream/GlobalThreads work in parallel
+        try {
+            clientInstanceIds.setAdminInstanceId(adminClient.clientInstanceId(timeout));
+            remainingTime.update(time.milliseconds());
+        } catch (final IllegalStateException telemetryDisabledError) {
+            // swallow
+            log.debug("Telemetry is disabled on the admin client.");
+        } catch (final TimeoutException timeoutException) {
+            throw timeoutException;
+        } catch (final Exception error) {
+            throw new StreamsException("Could not retrieve admin client instance id.", error);
+        }
+
+        // (3) collect client instance ids from threads
+
+        // (3a) collect consumers and producer from StreamsThread
+        for (final Map.Entry<String, KafkaFuture<Uuid>> clientFuture : clientFutures.entrySet()) {
+            final Uuid instanceId = getOrThrowException(
+                clientFuture.getValue(),
+                remainingTime.remainingMs(),
+                () -> String.format(
+                    "Could not retrieve consumer/producer instance id for %s.",
+                    clientFuture.getKey()
+                )
+            );
+            remainingTime.update(time.milliseconds());
+
+            // could be `null` if telemetry is disabled on the consumer itself
+            if (instanceId != null) {
+                final String clientFutureKey = clientFuture.getKey();
+                if (clientFutureKey.toLowerCase(Locale.getDefault()).endsWith("-producer")) {
+                    clientInstanceIds.addProducerInstanceId(
+                            clientFutureKey,
+                            instanceId
+                    );
+                } else {
+                    clientInstanceIds.addConsumerInstanceId(
+                            clientFutureKey,
+                            instanceId
+                    );
+                }
+            } else {
+                log.debug(String.format("Telemetry is disabled for %s.", clientFuture.getKey()));
+            }
+        }
+
+        // (3b) collect from GlobalThread
+        if (globalThreadFuture != null) {
+            final Uuid instanceId = getOrThrowException(
+                globalThreadFuture,
+                remainingTime.remainingMs(),
+                () -> "Could not retrieve global consumer client instance id."
+            );
+            remainingTime.update(time.milliseconds());
+
+            // could be `null` if telemetry is disabled on the client itself
+            if (instanceId != null) {
+                clientInstanceIds.addConsumerInstanceId(
+                    globalStreamThread.getName() + "-global-consumer",
+                    instanceId
+                );
+            } else {
+                log.debug("Telemetry is disabled for the global consumer.");
+            }
+        }
+
+        return clientInstanceIds;
+    }
+
+    private <T> T getOrThrowException(
+        final KafkaFuture<T> future,
+        final long timeoutMs,
+        final Supplier<String> errorMessage) {
+        final Throwable cause;
+
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (final java.util.concurrent.TimeoutException timeout) {
+            throw new TimeoutException(errorMessage.get(), timeout);
+        } catch (final ExecutionException exception) {
+            cause = exception.getCause();
+            if (cause instanceof TimeoutException) {
+                throw (TimeoutException) cause;
+            }
+        } catch (final InterruptedException error) {
+            cause = error;
+        }
+
+        throw new StreamsException(errorMessage.get(), cause);
     }
 
     /**
@@ -1043,12 +2179,185 @@ public class KafkaStreams {
      *
      * @return the set of {@link ThreadMetadata}.
      */
-    public Set<ThreadMetadata> localThreadsMetadata() {
-        validateIsRunning();
+    public Set<ThreadMetadata> metadataForLocalThreads() {
         final Set<ThreadMetadata> threadMetadata = new HashSet<>();
-        for (StreamThread thread : threads) {
-            threadMetadata.add(thread.threadMetadata());
-        }
+        processStreamThread(thread -> {
+            synchronized (thread.getStateLock()) {
+                if (thread.state() != StreamThread.State.DEAD) {
+                    threadMetadata.add(thread.threadMetadata());
+                }
+            }
+        });
         return threadMetadata;
     }
+
+    /**
+     * Returns {@link LagInfo}, for all store partitions (active or standby) local to this Streams instance. Note that the
+     * values returned are just estimates and meant to be used for making soft decisions on whether the data in the store
+     * partition is fresh enough for querying.
+     *
+     * <p>Note: Each invocation of this method issues a call to the Kafka brokers. Thus, it's advisable to limit the frequency
+     * of invocation to once every few seconds.
+     *
+     * @return map of store names to another map of partition to {@link LagInfo}s
+     * @throws StreamsException if the admin client request throws exception
+     */
+    public Map<String, Map<Integer, LagInfo>> allLocalStorePartitionLags() {
+        final List<Task> allTasks = new ArrayList<>();
+        processStreamThread(thread -> allTasks.addAll(thread.readyOnlyAllTasks()));
+        return allLocalStorePartitionLags(allTasks);
+    }
+
+    @SuppressKafkaInternalApiUsage("KIP-1265: protected method's signature exposes internal Task for subclass access — pending KIP review to promote the type or refactor")
+    protected Map<String, Map<Integer, LagInfo>> allLocalStorePartitionLags(final List<Task> tasksToCollectLagFor) {
+        final Map<String, Map<Integer, LagInfo>> localStorePartitionLags = new TreeMap<>();
+        final Collection<TopicPartition> allPartitions = new LinkedList<>();
+        final Map<TopicPartition, Long> allChangelogPositions = new HashMap<>();
+
+        // Obtain the current positions, of all the active-restoring and standby tasks
+        for (final Task task : tasksToCollectLagFor) {
+            allPartitions.addAll(task.changelogPartitions());
+            // Note that not all changelog partitions, will have positions; since some may not have started
+            allChangelogPositions.putAll(task.changelogOffsets());
+        }
+
+        log.debug("Current changelog positions: {}", allChangelogPositions);
+        final Map<TopicPartition, ListOffsetsResultInfo> allEndOffsets;
+        allEndOffsets = fetchEndOffsets(allPartitions, adminClient);
+        log.debug("Current end offsets :{}", allEndOffsets);
+
+        for (final Map.Entry<TopicPartition, ListOffsetsResultInfo> entry : allEndOffsets.entrySet()) {
+            // Avoiding an extra admin API lookup by computing lags for not-yet-started restorations
+            // from zero instead of the real "earliest offset" for the changelog.
+            // This will yield the correct relative order of lagginess for the tasks in the cluster,
+            // but it is an over-estimate of how much work remains to restore the task from scratch.
+            final long earliestOffset = 0L;
+            final long changelogPosition = allChangelogPositions.getOrDefault(entry.getKey(), earliestOffset);
+            final long latestOffset = entry.getValue().offset();
+            final LagInfo lagInfo = new LagInfo(changelogPosition == Task.LATEST_OFFSET ? latestOffset : changelogPosition, latestOffset);
+            final String storeName = streamsMetadataState.storeForChangelogTopic(entry.getKey().topic());
+            localStorePartitionLags.computeIfAbsent(storeName, ignored -> new TreeMap<>())
+                .put(entry.getKey().partition(), lagInfo);
+        }
+
+        return Collections.unmodifiableMap(localStorePartitionLags);
+    }
+
+    /**
+     * Run an interactive query against a state store.
+     * <p>
+     * This method allows callers outside the Streams runtime to access the internal state of
+     * stateful processors. See <a href="https://kafka.apache.org/documentation/streams/developer-guide/interactive-queries.html">IQ docs</a>
+     * for more information.
+     * <p>
+     * NOTICE: This functionality is {@link Evolving} and subject to change in minor versions.
+     * Once it is stabilized, this notice and the evolving annotation will be removed.
+     *
+     * @param <R> The result type specified by the query.
+     * @throws StreamsNotStartedException If Streams has not yet been started. Just call {@link
+     *                                    KafkaStreams#start()} and then retry this call.
+     * @throws StreamsStoppedException    If Streams is in a terminal state like PENDING_SHUTDOWN,
+     *                                    NOT_RUNNING, PENDING_ERROR, or ERROR. The caller should
+     *                                    discover a new instance to query.
+     * @throws UnknownStateStoreException If the specified store name does not exist in the
+     *                                    topology.
+     */
+    @Evolving
+    public <R> StateQueryResult<R> query(final StateQueryRequest<R> request) {
+        final String storeName = request.getStoreName();
+        if (!topologyMetadata.hasStore(storeName)) {
+            throw new UnknownStateStoreException(
+                "Cannot get state store "
+                    + storeName
+                    + " because no such store is registered in the topology."
+            );
+        }
+        if (state().hasNotStarted()) {
+            throw new StreamsNotStartedException(
+                "KafkaStreams has not been started, you can retry after calling start()."
+            );
+        }
+        if (state().isShuttingDown() || state.hasCompletedShutdown()) {
+            throw new StreamsStoppedException(
+                "KafkaStreams has been stopped (" + state + ")."
+                    + " This instance can no longer serve queries."
+            );
+        }
+        final StateQueryResult<R> result = new StateQueryResult<>();
+
+        final Map<String, StateStore> globalStateStores = topologyMetadata.globalStateStores();
+        if (globalStateStores.containsKey(storeName)) {
+            // See KAFKA-13523
+            result.setGlobalResult(
+                QueryResult.forFailure(
+                    FailureReason.UNKNOWN_QUERY_TYPE,
+                    "Global stores do not yet support the KafkaStreams#query API. Use KafkaStreams#store instead."
+                )
+            );
+        } else {
+            for (final StreamThread thread : threads) {
+                final Set<Task> tasks = thread.readyOnlyAllTasks();
+                for (final Task task : tasks) {
+
+                    final TaskId taskId = task.id();
+                    final int partition = taskId.partition();
+                    if (request.isAllPartitions() || request.getPartitions().contains(partition)) {
+                        final StateStore store = task.store(storeName);
+                        if (store != null) {
+                            final StreamThread.State state = thread.state();
+                            final boolean active = task.isActive();
+                            if (request.isRequireActive()
+                                && (state != StreamThread.State.RUNNING || !active)) {
+
+                                result.addResult(
+                                    partition,
+                                    QueryResult.forFailure(
+                                        FailureReason.NOT_ACTIVE,
+                                        "Query requires a running active task,"
+                                            + " but partition was in state "
+                                            + state + " and was "
+                                            + (active ? "active" : "not active") + "."
+                                    )
+                                );
+                            } else {
+                                final QueryResult<R> r = store.query(
+                                    request.getQuery(),
+                                    request.isRequireActive()
+                                        ? PositionBound.unbounded()
+                                        : request.getPositionBound(),
+                                    new QueryConfig(
+                                        request.executionInfoEnabled(),
+                                        request.isolationLevel()
+                                            .orElseGet(applicationConfigs::defaultInteractiveQueryIsolationLevel))
+                                );
+                                result.addResult(partition, r);
+                            }
+
+
+                            // optimization: if we have handled all the requested partitions,
+                            // we can return right away.
+                            if (!request.isAllPartitions()
+                                && result.getPartitionResults().keySet().containsAll(request.getPartitions())) {
+                                return result;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!request.isAllPartitions()) {
+            for (final Integer partition : request.getPartitions()) {
+                if (!result.getPartitionResults().containsKey(partition)) {
+                    result.addResult(partition, QueryResult.forFailure(
+                        FailureReason.NOT_PRESENT,
+                        "The requested partition was not present at the time of the query."
+                    ));
+                }
+            }
+        }
+
+        return result;
+    }
+
 }

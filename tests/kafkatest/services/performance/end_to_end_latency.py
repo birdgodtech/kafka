@@ -15,9 +15,9 @@
 
 import os
 
+from kafkatest.services.kafka.util import fix_opts_for_new_jvm, get_log4j_config_param, get_log4j_config_for_tools
 from kafkatest.services.performance import PerformanceService
-from kafkatest.services.security.security_config import SecurityConfig
-from kafkatest.version import DEV_BRANCH, V_0_9_0_0
+from kafkatest.version import get_version, V_3_4_0, DEV_BRANCH
 
 
 
@@ -30,7 +30,6 @@ class EndToEndLatencyService(PerformanceService):
     STDOUT_CAPTURE = os.path.join(PERSISTENT_ROOT, "end_to_end_latency.stdout")
     STDERR_CAPTURE = os.path.join(PERSISTENT_ROOT, "end_to_end_latency.stderr")
     LOG_FILE = os.path.join(LOG_DIR, "end_to_end_latency.log")
-    LOG4J_CONFIG = os.path.join(PERSISTENT_ROOT, "tools-log4j.properties")
     CONFIG_FILE = os.path.join(PERSISTENT_ROOT, "client.properties")
 
     logs = {
@@ -45,25 +44,18 @@ class EndToEndLatencyService(PerformanceService):
             "collect_default": True}
     }
 
-    def __init__(self, context, num_nodes, kafka, topic, num_records, compression_type="none", version=DEV_BRANCH, acks=1):
+    def __init__(self, context, num_nodes, kafka, topic, num_records, version=DEV_BRANCH, acks=1, settings=None):
         super(EndToEndLatencyService, self).__init__(context, num_nodes,
                                                      root=EndToEndLatencyService.PERSISTENT_ROOT)
         self.kafka = kafka
         self.security_config = kafka.security_config.client_config()
-
-        security_protocol = self.security_config.security_protocol
-
-        if version < V_0_9_0_0:
-            assert security_protocol == SecurityConfig.PLAINTEXT, \
-                "Security protocol %s is only supported if version >= 0.9.0.0, version %s" % (self.security_config, str(version))
-            assert compression_type == "none", \
-                "Compression type %s is only supported if version >= 0.9.0.0, version %s" % (compression_type, str(version))
+        self.version = ''
+        self.settings = settings if settings is not None else {}
 
         self.args = {
             'topic': topic,
             'num_records': num_records,
             'acks': acks,
-            'compression_type': compression_type,
             'kafka_opts': self.security_config.kafka_opts,
             'message_bytes': EndToEndLatencyService.MESSAGE_BYTES
         }
@@ -73,22 +65,18 @@ class EndToEndLatencyService(PerformanceService):
 
     def start_cmd(self, node):
         args = self.args.copy()
+        self.version = get_version(node)
         args.update({
-            'zk_connect': self.kafka.zk_connect_setting(),
             'bootstrap_servers': self.kafka.bootstrap_servers(self.security_config.security_protocol),
             'config_file': EndToEndLatencyService.CONFIG_FILE,
             'kafka_run_class': self.path.script("kafka-run-class.sh", node),
             'java_class_name': self.java_class_name()
         })
 
-        cmd = "export KAFKA_LOG4J_OPTS=\"-Dlog4j.configuration=file:%s\"; " % EndToEndLatencyService.LOG4J_CONFIG
-        if node.version >= V_0_9_0_0:
-            cmd += "KAFKA_OPTS=%(kafka_opts)s %(kafka_run_class)s %(java_class_name)s " % args
-            cmd += "%(bootstrap_servers)s %(topic)s %(num_records)d %(acks)d %(message_bytes)d %(config_file)s" % args
-        else:
-            # Set fetch max wait to 0 to match behavior in later versions
-            cmd += "KAFKA_OPTS=%(kafka_opts)s %(kafka_run_class)s kafka.tools.TestEndToEndLatency " % args
-            cmd += "%(bootstrap_servers)s %(zk_connect)s %(topic)s %(num_records)d 0 %(acks)d" % args
+        cmd = fix_opts_for_new_jvm(node)
+        cmd += "export KAFKA_LOG4J_OPTS=\"%s%s\"; " % (get_log4j_config_param(node), get_log4j_config_for_tools(node))
+        cmd += "KAFKA_OPTS=%(kafka_opts)s %(kafka_run_class)s %(java_class_name)s " % args
+        cmd += "%(bootstrap_servers)s %(topic)s %(num_records)d %(acks)d %(message_bytes)d %(config_file)s" % args
 
         cmd += " 2>> %(stderr)s | tee -a %(stdout)s" % {'stdout': EndToEndLatencyService.STDOUT_CAPTURE,
                                                         'stderr': EndToEndLatencyService.STDERR_CAPTURE}
@@ -98,12 +86,11 @@ class EndToEndLatencyService(PerformanceService):
     def _worker(self, idx, node):
         node.account.ssh("mkdir -p %s" % EndToEndLatencyService.PERSISTENT_ROOT, allow_fail=False)
 
-        log_config = self.render('tools_log4j.properties', log_file=EndToEndLatencyService.LOG_FILE)
+        log_config = self.render(get_log4j_config_for_tools(node), log_file=EndToEndLatencyService.LOG_FILE)
 
-        node.account.create_file(EndToEndLatencyService.LOG4J_CONFIG, log_config)
+        node.account.create_file(get_log4j_config_for_tools(node), log_config)
         client_config = str(self.security_config)
-        if node.version >= V_0_9_0_0:
-            client_config += "compression_type=%(compression_type)s" % self.args
+        client_config += "".join("%s=%s\n" % (str(key), str(value)) for key, value in self.settings.items())
         node.account.create_file(EndToEndLatencyService.CONFIG_FILE, client_config)
 
         self.security_config.setup_node(node)
@@ -121,4 +108,7 @@ class EndToEndLatencyService(PerformanceService):
         self.results[idx-1] = results
 
     def java_class_name(self):
-        return "kafka.tools.EndToEndLatency"
+        if self.version <= V_3_4_0:
+            return "kafka.tools.EndToEndLatency"
+        else:
+            return "org.apache.kafka.tools.EndToEndLatency"

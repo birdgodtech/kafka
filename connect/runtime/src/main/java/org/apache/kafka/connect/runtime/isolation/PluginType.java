@@ -17,45 +17,46 @@
 package org.apache.kafka.connect.runtime.isolation;
 
 import org.apache.kafka.common.config.provider.ConfigProvider;
-import org.apache.kafka.connect.connector.Connector;
+import org.apache.kafka.connect.connector.policy.ConnectorClientConfigOverridePolicy;
 import org.apache.kafka.connect.rest.ConnectRestExtension;
 import org.apache.kafka.connect.sink.SinkConnector;
 import org.apache.kafka.connect.source.SourceConnector;
 import org.apache.kafka.connect.storage.Converter;
+import org.apache.kafka.connect.storage.HeaderConverter;
 import org.apache.kafka.connect.transforms.Transformation;
+import org.apache.kafka.connect.transforms.predicates.Predicate;
+
+import com.fasterxml.jackson.annotation.JsonValue;
 
 import java.util.Locale;
 
 public enum PluginType {
     SOURCE(SourceConnector.class),
     SINK(SinkConnector.class),
-    CONNECTOR(Connector.class),
     CONVERTER(Converter.class),
+    HEADER_CONVERTER(HeaderConverter.class),
     TRANSFORMATION(Transformation.class),
+    PREDICATE(Predicate.class),
     CONFIGPROVIDER(ConfigProvider.class),
     REST_EXTENSION(ConnectRestExtension.class),
-    UNKNOWN(Object.class);
+    CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY(ConnectorClientConfigOverridePolicy.class);
 
-    private Class<?> klass;
+    private final Class<?> klass;
 
     PluginType(Class<?> klass) {
         this.klass = klass;
-    }
-
-    public static PluginType from(Class<?> klass) {
-        for (PluginType type : PluginType.values()) {
-            if (type.klass.isAssignableFrom(klass)) {
-                return type;
-            }
-        }
-        return UNKNOWN;
     }
 
     public String simpleName() {
         return klass.getSimpleName();
     }
 
+    public Class<?> superClass() {
+        return klass;
+    }
+
     @Override
+    @JsonValue
     public String toString() {
         return super.toString().toLowerCase(Locale.ROOT);
     }

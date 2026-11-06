@@ -14,24 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.serialization;
 
-import java.util.Map;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
+@InterfaceAudience.Public
 public class ByteArrayDeserializer implements Deserializer<byte[]> {
-
-    @Override
-    public void configure(Map<String, ?> configs, boolean isKey) {
-        // nothing to do
-    }
 
     @Override
     public byte[] deserialize(String topic, byte[] data) {
         return data;
-    }
-
-    @Override
-    public void close() {
-        // nothing to do
     }
 }

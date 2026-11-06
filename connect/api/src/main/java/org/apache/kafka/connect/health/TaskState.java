@@ -17,11 +17,14 @@
 
 package org.apache.kafka.connect.health;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
 import java.util.Objects;
 
 /**
  * Describes the state, IDs, and any errors of a connector task.
  */
+@InterfaceAudience.Public
 public class TaskState extends AbstractState {
 
     private final int taskId;
@@ -50,20 +53,28 @@ public class TaskState extends AbstractState {
 
     @Override
     public boolean equals(Object o) {
-        if (this == o) {
+        if (this == o)
             return true;
-        }
-        if (o == null || getClass() != o.getClass()) {
+        if (o == null || getClass() != o.getClass())
             return false;
-        }
-
+        if (!super.equals(o))
+            return false;
         TaskState taskState = (TaskState) o;
-
         return taskId == taskState.taskId;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(taskId);
+        return Objects.hash(super.hashCode(), taskId);
+    }
+
+    @Override
+    public String toString() {
+        return "TaskState{"
+            + "taskId='" + taskId + '\''
+            + "state='" + state() + '\''
+            + ", traceMessage='" + traceMessage() + '\''
+            + ", workerId='" + workerId() + '\''
+            + '}';
     }
 }

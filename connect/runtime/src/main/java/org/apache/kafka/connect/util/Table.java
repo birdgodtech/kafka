@@ -16,20 +16,15 @@
  */
 package org.apache.kafka.connect.util;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
 public class Table<R, C, V> {
 
-    private Map<R, Map<C, V>> table = new HashMap<>();
+    private final Map<R, Map<C, V>> table = new HashMap<>();
 
     public V put(R row, C column, V value) {
-        Map<C, V> columns = table.get(row);
-        if (columns == null) {
-            columns = new HashMap<>();
-            table.put(row, columns);
-        }
+        Map<C, V> columns = table.computeIfAbsent(row, k -> new HashMap<>());
         return columns.put(column, value);
     }
 
@@ -58,8 +53,11 @@ public class Table<R, C, V> {
     public Map<C, V> row(R row) {
         Map<C, V> columns = table.get(row);
         if (columns == null)
-            return Collections.emptyMap();
-        return Collections.unmodifiableMap(columns);
+            return Map.of();
+        return Map.copyOf(columns);
     }
 
+    public boolean isEmpty() {
+        return table.isEmpty();
+    }
 }

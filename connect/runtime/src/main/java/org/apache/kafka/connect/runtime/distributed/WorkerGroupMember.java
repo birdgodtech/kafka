@@ -17,34 +17,43 @@
 package org.apache.kafka.connect.runtime.distributed;
 
 import org.apache.kafka.clients.ApiVersions;
+import org.apache.kafka.clients.BootstrapConfiguration;
 import org.apache.kafka.clients.ClientUtils;
 import org.apache.kafka.clients.CommonClientConfigs;
+import org.apache.kafka.clients.GroupRebalanceConfig;
 import org.apache.kafka.clients.Metadata;
+import org.apache.kafka.clients.MetadataRecoveryStrategy;
 import org.apache.kafka.clients.NetworkClient;
+import org.apache.kafka.clients.consumer.CloseOptions;
 import org.apache.kafka.clients.consumer.internals.ConsumerNetworkClient;
-import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaException;
-import org.apache.kafka.common.metrics.JmxReporter;
+import org.apache.kafka.common.internals.ClusterResourceListeners;
+import org.apache.kafka.common.metrics.KafkaMetricsContext;
 import org.apache.kafka.common.metrics.MetricConfig;
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.MetricsContext;
 import org.apache.kafka.common.metrics.MetricsReporter;
 import org.apache.kafka.common.network.ChannelBuilder;
 import org.apache.kafka.common.network.Selector;
-import org.apache.kafka.common.utils.AppInfoParser;
-import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.utils.internals.AppInfoParser;
+import org.apache.kafka.common.utils.internals.LogContext;
+import org.apache.kafka.connect.runtime.WorkerConfig;
 import org.apache.kafka.connect.storage.ConfigBackingStore;
 import org.apache.kafka.connect.util.ConnectorTaskId;
+
 import org.slf4j.Logger;
 
-import java.net.InetSocketAddress;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
+
+import static org.apache.kafka.common.utils.Utils.UncheckedCloseable;
 
 /**
  * This class manages the coordination process with brokers for the Connect cluster group membership. It ties together
@@ -53,17 +62,12 @@ import java.util.concurrent.atomic.AtomicReference;
  * higher level operations in response to group membership events being handled by the herder.
  */
 public class WorkerGroupMember {
-
-    private static final AtomicInteger CONNECT_CLIENT_ID_SEQUENCE = new AtomicInteger(1);
     private static final String JMX_PREFIX = "kafka.connect";
 
     private final Logger log;
-    private final Time time;
     private final String clientId;
     private final ConsumerNetworkClient client;
     private final Metrics metrics;
-    private final Metadata metadata;
-    private final long retryBackoffMs;
     private final WorkerCoordinator coordinator;
 
     private boolean stopped = false;
@@ -72,15 +76,11 @@ public class WorkerGroupMember {
                              String restUrl,
                              ConfigBackingStore configStorage,
                              WorkerRebalanceListener listener,
-                             Time time) {
+                             Time time,
+                             String clientId,
+                             LogContext logContext) {
         try {
-            this.time = time;
-
-            String clientIdConfig = config.getString(CommonClientConfigs.CLIENT_ID_CONFIG);
-            clientId = clientIdConfig.length() <= 0 ? "connect-" + CONNECT_CLIENT_ID_SEQUENCE.getAndIncrement() : clientIdConfig;
-            String groupId = config.getString(DistributedConfig.GROUP_ID_CONFIG);
-
-            LogContext logContext = new LogContext("[Worker clientId=" + clientId + ", groupId=" + groupId + "] ");
+            this.clientId = clientId;
             this.log = logContext.logger(WorkerGroupMember.class);
 
             Map<String, String> metricsTags = new LinkedHashMap<>();
@@ -88,18 +88,26 @@ public class WorkerGroupMember {
             MetricConfig metricConfig = new MetricConfig().samples(config.getInt(CommonClientConfigs.METRICS_NUM_SAMPLES_CONFIG))
                     .timeWindow(config.getLong(CommonClientConfigs.METRICS_SAMPLE_WINDOW_MS_CONFIG), TimeUnit.MILLISECONDS)
                     .tags(metricsTags);
-            List<MetricsReporter> reporters = config.getConfiguredInstances(CommonClientConfigs.METRIC_REPORTER_CLASSES_CONFIG, MetricsReporter.class);
-            reporters.add(new JmxReporter(JMX_PREFIX));
-            this.metrics = new Metrics(metricConfig, reporters, time);
-            this.retryBackoffMs = config.getLong(CommonClientConfigs.RETRY_BACKOFF_MS_CONFIG);
-            this.metadata = new Metadata(retryBackoffMs, config.getLong(CommonClientConfigs.METADATA_MAX_AGE_CONFIG), true);
-            List<InetSocketAddress> addresses = ClientUtils.parseAndValidateAddresses(config.getList(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG));
-            this.metadata.update(Cluster.bootstrap(addresses), Collections.<String>emptySet(), 0);
+            List<MetricsReporter> reporters = CommonClientConfigs.metricsReporters(clientId, config);
+
+            Map<String, Object> contextLabels = new HashMap<>(config.originalsWithPrefix(CommonClientConfigs.METRICS_CONTEXT_PREFIX));
+            contextLabels.put(WorkerConfig.CONNECT_KAFKA_CLUSTER_ID, config.kafkaClusterId());
+            contextLabels.put(WorkerConfig.CONNECT_GROUP_ID, config.getString(DistributedConfig.GROUP_ID_CONFIG));
+            MetricsContext metricsContext = new KafkaMetricsContext(JMX_PREFIX, contextLabels);
+
+            this.metrics = new Metrics(metricConfig, reporters, time, metricsContext);
+            long retryBackoffMs = config.getLong(CommonClientConfigs.RETRY_BACKOFF_MS_CONFIG);
+            long retryBackoffMaxMs = config.getLong(CommonClientConfigs.RETRY_BACKOFF_MAX_MS_CONFIG);
+            Metadata metadata = new Metadata(retryBackoffMs, retryBackoffMaxMs, config.getLong(CommonClientConfigs.METADATA_MAX_AGE_CONFIG),
+                    logContext, new ClusterResourceListeners());
+            List<String> bootstrapServers = config.getList(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG);
+            ClientUtils.maybeBootstrapMetadataSynchronously(config, bootstrapServers, metadata);
             String metricGrpPrefix = "connect";
-            ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(config);
+            ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(config, time, logContext);
+            BootstrapConfiguration bootstrapConfiguration = ClientUtils.bootstrapConfiguration(config, bootstrapServers);
             NetworkClient netClient = new NetworkClient(
                     new Selector(config.getLong(CommonClientConfigs.CONNECTIONS_MAX_IDLE_MS_CONFIG), metrics, time, metricGrpPrefix, channelBuilder, logContext),
-                    this.metadata,
+                    metadata,
                     clientId,
                     100, // a fixed large enough value will suffice
                     config.getLong(CommonClientConfigs.RECONNECT_BACKOFF_MS_CONFIG),
@@ -107,10 +115,17 @@ public class WorkerGroupMember {
                     config.getInt(CommonClientConfigs.SEND_BUFFER_CONFIG),
                     config.getInt(CommonClientConfigs.RECEIVE_BUFFER_CONFIG),
                     config.getInt(CommonClientConfigs.REQUEST_TIMEOUT_MS_CONFIG),
+                    config.getLong(CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG),
+                    config.getLong(CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG),
                     time,
                     true,
                     new ApiVersions(),
-                    logContext);
+                    logContext,
+                    config.getLong(CommonClientConfigs.METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG),
+                    MetadataRecoveryStrategy.forName(config.getString(CommonClientConfigs.METADATA_RECOVERY_STRATEGY_CONFIG)),
+                    bootstrapConfiguration,
+                    config.getBoolean(CommonClientConfigs.METADATA_CLUSTER_CHECK_ENABLE_CONFIG)
+            );
             this.client = new ConsumerNetworkClient(
                     logContext,
                     netClient,
@@ -120,21 +135,19 @@ public class WorkerGroupMember {
                     config.getInt(CommonClientConfigs.REQUEST_TIMEOUT_MS_CONFIG),
                     Integer.MAX_VALUE);
             this.coordinator = new WorkerCoordinator(
+                    new GroupRebalanceConfig(config, GroupRebalanceConfig.ProtocolType.CONNECT),
                     logContext,
                     this.client,
-                    groupId,
-                    config.getInt(DistributedConfig.REBALANCE_TIMEOUT_MS_CONFIG),
-                    config.getInt(DistributedConfig.SESSION_TIMEOUT_MS_CONFIG),
-                    config.getInt(DistributedConfig.HEARTBEAT_INTERVAL_MS_CONFIG),
                     metrics,
                     metricGrpPrefix,
-                    this.time,
-                    retryBackoffMs,
+                    time,
                     restUrl,
                     configStorage,
-                    listener);
+                    listener,
+                    ConnectProtocolCompatibility.compatibility(config.getString(DistributedConfig.CONNECT_PROTOCOL_CONFIG)),
+                    config.getInt(DistributedConfig.SCHEDULED_REBALANCE_MAX_DELAY_MS_CONFIG));
 
-            AppInfoParser.registerAppInfo(JMX_PREFIX, clientId, metrics);
+            AppInfoParser.registerAppInfo(JMX_PREFIX, clientId, metrics, time.milliseconds());
             log.debug("Connect group member created");
         } catch (Throwable t) {
             // call close methods if internal objects are already constructed
@@ -150,14 +163,18 @@ public class WorkerGroupMember {
         stop(false);
     }
 
-    public void ensureActive() {
-        coordinator.poll(0);
+    /**
+     * Ensure that the connection to the broker coordinator is up and that the worker is an
+     * active member of the group.
+     */
+    public void ensureActive(Supplier<UncheckedCloseable> onPoll) {
+        coordinator.poll(0, onPoll);
     }
 
-    public void poll(long timeout) {
+    public void poll(long timeout, Supplier<UncheckedCloseable> onPoll) {
         if (timeout < 0)
             throw new IllegalArgumentException("Timeout must not be negative");
-        coordinator.poll(timeout);
+        coordinator.poll(timeout, onPoll);
     }
 
     /**
@@ -169,7 +186,7 @@ public class WorkerGroupMember {
 
     /**
      * Get the member ID of this worker in the group of workers.
-     *
+     * <p>
      * This ID is the unique member ID automatically generated.
      *
      * @return the member ID
@@ -179,11 +196,11 @@ public class WorkerGroupMember {
     }
 
     public void requestRejoin() {
-        coordinator.requestRejoin();
+        coordinator.requestRejoin("connect worker requested rejoin");
     }
 
-    public void maybeLeaveGroup() {
-        coordinator.maybeLeaveGroup();
+    public void maybeLeaveGroup(String leaveReason) {
+        coordinator.maybeLeaveGroup(CloseOptions.GroupMembershipOperation.LEAVE_GROUP, leaveReason);
     }
 
     public String ownerUrl(String connector) {
@@ -194,17 +211,35 @@ public class WorkerGroupMember {
         return coordinator.ownerUrl(task);
     }
 
+    /**
+     * Get the version of the connect protocol that is currently active in the group of workers.
+     *
+     * @return the current connect protocol version
+     */
+    public short currentProtocolVersion() {
+        return coordinator.currentProtocolVersion();
+    }
+
+    public void revokeAssignment(ExtendedAssignment assignment) {
+        coordinator.revokeAssignment(assignment);
+    }
+
     private void stop(boolean swallowException) {
         log.trace("Stopping the Connect group member.");
         AtomicReference<Throwable> firstException = new AtomicReference<>();
         this.stopped = true;
-        ClientUtils.closeQuietly(coordinator, "coordinator", firstException);
-        ClientUtils.closeQuietly(metrics, "consumer metrics", firstException);
-        ClientUtils.closeQuietly(client, "consumer network client", firstException);
+        Utils.closeQuietly(coordinator, "coordinator", firstException);
+        Utils.closeQuietly(metrics, "consumer metrics", firstException);
+        Utils.closeQuietly(client, "consumer network client", firstException);
         AppInfoParser.unregisterAppInfo(JMX_PREFIX, clientId, metrics);
         if (firstException.get() != null && !swallowException)
             throw new KafkaException("Failed to stop the Connect group member", firstException.get());
         else
             log.debug("The Connect group member has stopped.");
+    }
+
+    // Visible for testing
+    Metrics metrics() {
+        return this.metrics;
     }
 }

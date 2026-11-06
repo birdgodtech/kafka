@@ -14,9 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.errors;
 
-public class ReplicaNotAvailableException extends ApiException {
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
+/**
+ * The replica is not available for the requested topic partition. This may be
+ * a transient exception during reassignments. From version 2.6 onwards, Fetch requests
+ * and other requests intended only for the leader or follower of the topic partition return
+ * {@link NotLeaderOrFollowerException} if the broker is a not a replica of the partition.
+ */
+@InterfaceAudience.Public
+public class ReplicaNotAvailableException extends InvalidMetadataException {
 
     private static final long serialVersionUID = 1L;
 

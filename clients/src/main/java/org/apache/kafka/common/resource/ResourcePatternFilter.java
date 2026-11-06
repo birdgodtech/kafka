@@ -17,7 +17,7 @@
 
 package org.apache.kafka.common.resource;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Objects;
 
@@ -25,10 +25,8 @@ import static org.apache.kafka.common.resource.ResourcePattern.WILDCARD_RESOURCE
 
 /**
  * Represents a filter that can match {@link ResourcePattern}.
- * <p>
- * The API for this class is still evolving and we may break compatibility in minor releases, if necessary.
  */
-@InterfaceStability.Evolving
+@InterfaceAudience.Public
 public class ResourcePatternFilter {
     /**
      * Matches any resource pattern.
@@ -139,7 +137,7 @@ public class ResourcePatternFilter {
         if (name == null)
             return "Resource name is NULL.";
         if (patternType == PatternType.MATCH)
-            return "Resource pattern type is ANY.";
+            return "Resource pattern type is MATCH.";
         if (patternType == PatternType.UNKNOWN)
             return "Resource pattern type is UNKNOWN.";
         return null;

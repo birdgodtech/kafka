@@ -14,11 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.kafka.clients.consumer;
 
+package org.apache.kafka.clients.consumer;
 
 import org.apache.kafka.common.Configurable;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Map;
 
@@ -39,8 +40,11 @@ import java.util.Map;
  * {@link org.apache.kafka.clients.consumer.KafkaConsumer#poll(java.time.Duration)}.
  * <p>
  * Implement {@link org.apache.kafka.common.ClusterResourceListener} to receive cluster metadata once it's available. Please see the class documentation for ClusterResourceListener for more information.
+ * Implement {@link org.apache.kafka.common.metrics.Monitorable} to enable the interceptor to register metrics. The following tags are automatically added to
+ * all metrics registered: <code>config</code> set to <code>interceptor.classes</code>, and <code>class</code> set to the ConsumerInterceptor class name.
  */
-public interface ConsumerInterceptor<K, V> extends Configurable {
+@InterfaceAudience.Public
+public interface ConsumerInterceptor<K, V> extends Configurable, AutoCloseable {
 
     /**
      * This is called just before the records are returned by
@@ -65,7 +69,7 @@ public interface ConsumerInterceptor<K, V> extends Configurable {
      * @param records records to be consumed by the client or records returned by the previous interceptors in the list.
      * @return records that are either modified by the interceptor or same as records passed to this method.
      */
-    public ConsumerRecords<K, V> onConsume(ConsumerRecords<K, V> records);
+    ConsumerRecords<K, V> onConsume(ConsumerRecords<K, V> records);
 
     /**
      * This is called when offsets get committed.
@@ -74,10 +78,10 @@ public interface ConsumerInterceptor<K, V> extends Configurable {
      *
      * @param offsets A map of offsets by partition with associated metadata
      */
-    public void onCommit(Map<TopicPartition, OffsetAndMetadata> offsets);
+    void onCommit(Map<TopicPartition, OffsetAndMetadata> offsets);
 
     /**
      * This is called when interceptor is closed
      */
-    public void close();
+    void close();
 }

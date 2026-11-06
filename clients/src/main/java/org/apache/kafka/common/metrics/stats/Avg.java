@@ -16,13 +16,15 @@
  */
 package org.apache.kafka.common.metrics.stats;
 
-import java.util.List;
-
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.metrics.MetricConfig;
+
+import java.util.List;
 
 /**
  * A {@link SampledStat} that maintains a simple average over its samples.
  */
+@InterfaceAudience.Public
 public class Avg extends SampledStat {
 
     public Avg() {
@@ -42,7 +44,7 @@ public class Avg extends SampledStat {
             total += s.value;
             count += s.eventCount;
         }
-        return count == 0 ? 0 : total / count;
+        return count == 0 ? Double.NaN : total / count;
     }
 
 }

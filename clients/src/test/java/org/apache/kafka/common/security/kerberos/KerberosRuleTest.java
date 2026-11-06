@@ -16,34 +16,33 @@
  */
 package org.apache.kafka.common.security.kerberos;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import org.junit.jupiter.api.Test;
 
-import org.junit.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class KerberosRuleTest {
 
     @Test
     public void testReplaceParameters() throws BadFormatString {
         // positive test cases
-        assertEquals(KerberosRule.replaceParameters("", new String[0]), "");
-        assertEquals(KerberosRule.replaceParameters("hello", new String[0]), "hello");
-        assertEquals(KerberosRule.replaceParameters("", new String[]{"too", "many", "parameters", "are", "ok"}), "");
-        assertEquals(KerberosRule.replaceParameters("hello", new String[]{"too", "many", "parameters", "are", "ok"}), "hello");
-        assertEquals(KerberosRule.replaceParameters("hello $0", new String[]{"too", "many", "parameters", "are", "ok"}), "hello too");
-        assertEquals(KerberosRule.replaceParameters("hello $0", new String[]{"no recursion $1"}), "hello no recursion $1");
+        assertEquals("", KerberosRule.replaceParameters("", new String[0]));
+        assertEquals("hello", KerberosRule.replaceParameters("hello", new String[0]));
+        assertEquals("", KerberosRule.replaceParameters("", new String[]{"too", "many", "parameters", "are", "ok"}));
+        assertEquals("hello", KerberosRule.replaceParameters("hello", new String[]{"too", "many", "parameters", "are", "ok"}));
+        assertEquals("hello too", KerberosRule.replaceParameters("hello $0", new String[]{"too", "many", "parameters", "are", "ok"}));
+        assertEquals("hello no recursion $1", KerberosRule.replaceParameters("hello $0", new String[]{"no recursion $1"}));
 
         // negative test cases
-        try {
-            KerberosRule.replaceParameters("$0", new String[]{});
-            fail("An out-of-bounds parameter number should trigger an exception!");
-        } catch (BadFormatString bfs) {
-        }
-        try {
-            KerberosRule.replaceParameters("hello $a", new String[]{"does not matter"});
-            fail("A malformed parameter name should trigger an exception!");
-        } catch (BadFormatString bfs) {
-        }
+        assertThrows(
+            BadFormatString.class,
+            () -> KerberosRule.replaceParameters("$0", new String[]{}),
+            "An out-of-bounds parameter number should trigger an exception!");
+
+        assertThrows(
+            BadFormatString.class,
+            () -> KerberosRule.replaceParameters("hello $a", new String[]{"does not matter"}),
+            "A malformed parameter name should trigger an exception!");
     }
 
 }

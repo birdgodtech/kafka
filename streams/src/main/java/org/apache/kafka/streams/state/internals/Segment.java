@@ -16,50 +16,23 @@
  */
 package org.apache.kafka.streams.state.internals;
 
-import org.apache.kafka.common.utils.Utils;
-import org.apache.kafka.streams.processor.ProcessorContext;
+import org.apache.kafka.common.utils.Bytes;
+import org.apache.kafka.streams.state.KeyValueStore;
 
 import java.io.IOException;
-import java.util.Objects;
 
-class Segment extends RocksDBStore implements Comparable<Segment> {
-    public final long id;
+public interface Segment extends KeyValueStore<Bytes, byte[]>, BatchWritingStore, Comparable<Segment> {
 
-    Segment(String segmentName, String windowName, long id) {
-        super(segmentName, windowName);
-        this.id = id;
-    }
+    long id();
 
-    void destroy() throws IOException {
-        Utils.delete(dbDir);
-    }
+    void destroy() throws IOException;
+
+    void deleteRange(Bytes keyFrom, Bytes keyTo);
+
+    void writePosition();
 
     @Override
-    public int compareTo(Segment segment) {
-        return Long.compare(id, segment.id);
-    }
-
-    @Override
-    public void openDB(final ProcessorContext context) {
-        super.openDB(context);
-        // skip the registering step
-    }
-
-    @Override
-    public String toString() {
-        return "Segment(id=" + id + ", name=" + name() + ")";
-    }
-
-    @Override
-    public boolean equals(Object obj) {
-        if (obj == null || getClass() != obj.getClass()) return false;
-
-        Segment segment = (Segment) obj;
-        return Long.compare(id, segment.id) == 0;
-    }
-
-    @Override
-    public int hashCode() {
-        return Objects.hash(id);
+    default int compareTo(final Segment segment) {
+        return Long.compare(id(), segment.id());
     }
 }

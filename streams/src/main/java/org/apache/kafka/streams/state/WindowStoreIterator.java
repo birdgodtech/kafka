@@ -16,18 +16,22 @@
  */
 package org.apache.kafka.streams.state;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.streams.KeyValue;
 
 import java.io.Closeable;
+import java.time.Instant;
 
 /**
- * Iterator interface of {@link KeyValue} with key typed {@link Long} used for {@link WindowStore#fetch(Object, long, long)}.
+ * Iterator interface of {@link KeyValue} with key typed {@link Long} used for {@link WindowStore#fetch(Object, long, long)}
+ * and {@link WindowStore#fetch(Object, Instant, Instant)}
  *
  * Users must call its {@code close} method explicitly upon completeness to release resources,
  * or use try-with-resources statement (available since JDK7) for this {@link Closeable} class.
  *
  * @param <V> Type of values
  */
+@InterfaceAudience.Public
 public interface WindowStoreIterator<V> extends KeyValueIterator<Long, V>, Closeable {
 
     @Override

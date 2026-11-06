@@ -40,8 +40,10 @@ ec2_keypair_file = nil
 
 ec2_region = "us-east-1"
 ec2_az = nil # Uses set by AWS
-ec2_ami = "ami-905730e8"
+ec2_ami = "ami-29ebb519"
 ec2_instance_type = "m3.medium"
+ec2_spot_instance = ENV['SPOT_INSTANCE'] ? ENV['SPOT_INSTANCE'] == 'true' : true
+ec2_spot_max_price = "0.113"  # On-demand price for instance type
 ec2_user = "ubuntu"
 ec2_instance_name_prefix = "kafka-vagrant"
 ec2_security_groups = nil
@@ -49,10 +51,28 @@ ec2_subnet_id = nil
 # Only override this by setting it to false if you're running in a VPC and you
 # are running Vagrant from within that VPC as well.
 ec2_associate_public_ip = nil
+ec2_iam_instance_profile_name = nil
+
+ebs_volume_type = 'gp3'
+
+jdk_major = '17'
+jdk_full = '17-linux-x64'
 
 local_config_file = File.join(File.dirname(__FILE__), "Vagrantfile.local")
-if File.exists?(local_config_file) then
+if File.exist?(local_config_file) then
   eval(File.read(local_config_file), binding, "Vagrantfile.local")
+end
+
+# override any instance type set by Vagrantfile.local or above via an environment variable
+if ENV['INSTANCE_TYPE'] then
+  ec2_instance_type = ENV['INSTANCE_TYPE']
+end
+
+# choose size based on overridden size
+if ec2_instance_type.start_with?("m3") then
+  ebs_volume_size = 20
+else
+  ebs_volume_size = 40
 end
 
 # TODO(ksweeney): RAM requirements are not empirical and can probably be significantly lowered.
@@ -73,15 +93,6 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
     if Vagrant.has_plugin?("vagrant-cachier")
       override.cache.scope = :box
-      # Besides the defaults, we use a custom cache to handle the Oracle JDK
-      # download, which downloads via wget during an apt install. Because of the
-      # way the installer ends up using its cache directory, we need to jump
-      # through some hoops instead of just specifying a cache directly -- we
-      # share to a temporary location and the provisioning scripts symlink data
-      # to the right location.
-      override.cache.enable :generic, {
-        "oracle-jdk8" => { cache_dir: "/tmp/oracle-jdk8-installer-cache" },
-      }
     end
   end
 
@@ -122,9 +133,11 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     aws.region = ec2_region
     aws.availability_zone = ec2_az
     aws.instance_type = ec2_instance_type
+
     aws.ami = ec2_ami
     aws.security_groups = ec2_security_groups
     aws.subnet_id = ec2_subnet_id
+    aws.block_device_mapping = [{ 'DeviceName' => '/dev/sda1', 'Ebs.VolumeType' => ebs_volume_type, 'Ebs.VolumeSize' => ebs_volume_size }]
     # If a subnet is specified, default to turning on a public IP unless the
     # user explicitly specifies the option. Without a public IP, Vagrant won't
     # be able to SSH into the hosts unless Vagrant is also running in the VPC.
@@ -133,6 +146,11 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     else
       aws.associate_public_ip = ec2_associate_public_ip
     end
+    aws.region_config ec2_region do |region|
+      region.spot_instance = ec2_spot_instance
+      region.spot_max_price = ec2_spot_max_price
+    end
+    aws.iam_instance_profile_name = ec2_iam_instance_profile_name
 
     # Exclude some directories that can grow very large from syncing
     override.vm.synced_folder ".", "/vagrant", type: "rsync", rsync__exclude: ['.git', 'core/data/', 'logs/', 'tests/results/', 'results/']
@@ -163,7 +181,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       name_node(zookeeper, name, ec2_instance_name_prefix)
       ip_address = "192.168.50." + (10 + i).to_s
       assign_local_ip(zookeeper, ip_address)
-      zookeeper.vm.provision "shell", path: "vagrant/base.sh"
+      zookeeper.vm.provision "shell", path: "vagrant/base.sh", env: {"JDK_MAJOR" => jdk_major, "JDK_FULL" => jdk_full}
       zk_jmx_port = enable_jmx ? (8000 + i).to_s : ""
       zookeeper.vm.provision "shell", path: "vagrant/zk.sh", :args => [i.to_s, num_zookeepers, zk_jmx_port]
     end
@@ -180,7 +198,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       # host DNS isn't setup, we shouldn't use hostnames -- IP addresses must be
       # used to support clients running on the host.
       zookeeper_connect = zookeepers.map{ |zk_addr| zk_addr + ":2181"}.join(",")
-      broker.vm.provision "shell", path: "vagrant/base.sh"
+      broker.vm.provision "shell", path: "vagrant/base.sh", env: {"JDK_MAJOR" => jdk_major, "JDK_FULL" => jdk_full}
       kafka_jmx_port = enable_jmx ? (9000 + i).to_s : ""
       broker.vm.provision "shell", path: "vagrant/broker.sh", :args => [i.to_s, enable_dns ? name : ip_address, zookeeper_connect, kafka_jmx_port]
     end
@@ -192,7 +210,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       name_node(worker, name, ec2_instance_name_prefix)
       ip_address = "192.168.50." + (100 + i).to_s
       assign_local_ip(worker, ip_address)
-      worker.vm.provision "shell", path: "vagrant/base.sh"
+      worker.vm.provision "shell", path: "vagrant/base.sh", env: {"JDK_MAJOR" => jdk_major, "JDK_FULL" => jdk_full}
     end
   }
 

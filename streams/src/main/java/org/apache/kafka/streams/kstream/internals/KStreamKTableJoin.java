@@ -17,31 +17,53 @@
 package org.apache.kafka.streams.kstream.internals;
 
 import org.apache.kafka.streams.kstream.KeyValueMapper;
-import org.apache.kafka.streams.kstream.ValueJoiner;
-import org.apache.kafka.streams.processor.Processor;
-import org.apache.kafka.streams.processor.ProcessorSupplier;
+import org.apache.kafka.streams.kstream.ValueJoinerWithKey;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.ProcessorSupplier;
+import org.apache.kafka.streams.state.StoreBuilder;
 
-class KStreamKTableJoin<K, R, V1, V2> implements ProcessorSupplier<K, V1> {
+import java.time.Duration;
+import java.util.Optional;
+import java.util.Set;
 
-    private final KeyValueMapper<K, V1, K> keyValueMapper = new KeyValueMapper<K, V1, K>() {
-        @Override
-        public K apply(final K key, final V1 value) {
-            return key;
-        }
-    };
-    private final KTableValueGetterSupplier<K, V2> valueGetterSupplier;
-    private final ValueJoiner<? super V1, ? super V2, R> joiner;
+class KStreamKTableJoin<StreamKey, StreamValue, TableValue, VOut> implements ProcessorSupplier<StreamKey, StreamValue, StreamKey, VOut> {
+
+    private final KeyValueMapper<StreamKey, StreamValue, StreamKey> keyValueMapper = (key, value) -> key;
+    private final KTableValueGetterSupplier<StreamKey, TableValue> valueGetterSupplier;
+    private final ValueJoinerWithKey<? super StreamKey, ? super StreamValue, ? super TableValue, ? extends VOut> joiner;
     private final boolean leftJoin;
+    private final Optional<Duration> gracePeriod;
+    private final Optional<String> storeName;
+    private final Set<StoreBuilder<?>> stores;
 
-    KStreamKTableJoin(final KTableValueGetterSupplier<K, V2> valueGetterSupplier, final ValueJoiner<? super V1, ? super V2, R> joiner, final boolean leftJoin) {
+    KStreamKTableJoin(final KTableValueGetterSupplier<StreamKey, TableValue> valueGetterSupplier,
+                      final ValueJoinerWithKey<? super StreamKey, ? super StreamValue, ? super TableValue, ? extends VOut> joiner,
+                      final boolean leftJoin,
+                      final Optional<Duration> gracePeriod,
+                      final Optional<StoreBuilder<?>> bufferStoreBuilder) {
         this.valueGetterSupplier = valueGetterSupplier;
         this.joiner = joiner;
         this.leftJoin = leftJoin;
+        this.gracePeriod = gracePeriod;
+        this.storeName = bufferStoreBuilder.map(StoreBuilder::name);
+
+        this.stores = bufferStoreBuilder.<Set<StoreBuilder<?>>>map(Set::of).orElse(null);
     }
 
     @Override
-    public Processor<K, V1> get() {
-        return new KStreamKTableJoinProcessor<>(valueGetterSupplier.get(), keyValueMapper, joiner, leftJoin);
+    public Set<StoreBuilder<?>> stores() {
+        return stores;
+    }
+
+    @Override
+    public Processor<StreamKey, StreamValue, StreamKey, VOut> get() {
+        return new KStreamKTableJoinProcessor<>(
+            valueGetterSupplier.get(),
+            keyValueMapper,
+            (streamKey, mappedKey, value1, value2) -> joiner.apply(streamKey, value1, value2),
+            leftJoin,
+            gracePeriod,
+            storeName);
     }
 
 }

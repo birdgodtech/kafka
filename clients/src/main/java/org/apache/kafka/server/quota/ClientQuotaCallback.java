@@ -18,13 +18,22 @@ package org.apache.kafka.server.quota;
 
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Configurable;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
 
 import java.util.Map;
 
 /**
- * Quota callback interface for brokers that enables customization of client quota computation.
+ * Quota callback interface for brokers and controllers that enables customization of client quota computation.
+ * Implement {@link org.apache.kafka.common.metrics.Monitorable} to enable the callback to register metrics. 
+ * The following tags are automatically added to all metrics registered: 
+ * <ul>
+ *     <li><code>config</code> set to <code>client.quota.callback.class</code></li>
+ *     <li><code>class</code> set to the ClientQuotaCallback class name</li>
+ *     <li><code>role</code> set to broker/controller, which indicates the role of the server</li>
+ * </ul>
  */
+@InterfaceAudience.Public
 public interface ClientQuotaCallback extends Configurable {
 
     /**
@@ -55,7 +64,7 @@ public interface ClientQuotaCallback extends Configurable {
 
     /**
      * Quota configuration update callback that is invoked when quota configuration for an entity is
-     * updated in ZooKeeper. This is useful to track configured quotas if built-in quota configuration
+     * updated in the quorum. This is useful to track configured quotas if built-in quota configuration
      * tools are used for quota management.
      *
      * @param quotaType   Type of quota being updated
@@ -66,7 +75,7 @@ public interface ClientQuotaCallback extends Configurable {
 
     /**
      * Quota configuration removal callback that is invoked when quota configuration for an entity is
-     * removed in ZooKeeper. This is useful to track configured quotas if built-in quota configuration
+     * removed in the quorum. This is useful to track configured quotas if built-in quota configuration
      * tools are used for quota management.
      *
      * @param quotaType   Type of quota being updated
@@ -89,18 +98,22 @@ public interface ClientQuotaCallback extends Configurable {
     boolean quotaResetRequired(ClientQuotaType quotaType);
 
     /**
-     * Metadata update callback that is invoked whenever UpdateMetadata request is received from
-     * the controller. This is useful if quota computation takes partitions into account.
+     * This callback is invoked whenever there are changes in the cluster metadata, such as
+     * brokers being added or removed, topics being created or deleted, or partition leadership updates.
+     * This is useful if quota computation takes partitions into account.
      * Topics that are being deleted will not be included in `cluster`.
      *
+     * @deprecated since 4.4 and should not be used any longer.
      * @param cluster Cluster metadata including partitions and their leaders if known
      * @return true if quotas have changed and metric configs may need to be updated
      */
-    boolean updateClusterMetadata(Cluster cluster);
+    @Deprecated(since = "4.4", forRemoval = true)
+    default boolean updateClusterMetadata(Cluster cluster) {
+        return false;
+    }
 
     /**
      * Closes this instance.
      */
     void close();
 }
-

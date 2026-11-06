@@ -14,12 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.config;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+@InterfaceAudience.Public
 public class ConfigValue {
 
     private final String name;
@@ -29,7 +33,7 @@ public class ConfigValue {
     private boolean visible;
 
     public ConfigValue(String name) {
-        this(name, null, new ArrayList<>(), new ArrayList<String>());
+        this(name, null, new ArrayList<>(), new ArrayList<>());
     }
 
     public ConfigValue(String name, Object value, List<Object> recommendedValues, List<String> errorMessages) {
@@ -95,18 +99,12 @@ public class ConfigValue {
 
     @Override
     public String toString() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("[")
-            .append(name)
-            .append(",")
-            .append(value)
-            .append(",")
-            .append(recommendedValues)
-            .append(",")
-            .append(errorMessages)
-            .append(",")
-            .append(visible)
-            .append("]");
-        return sb.toString();
+        return "[" +
+                name + "," +
+                value + "," +
+                recommendedValues + "," +
+                errorMessages + "," +
+                visible +
+                "]";
     }
 }

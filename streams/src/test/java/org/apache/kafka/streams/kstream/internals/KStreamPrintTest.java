@@ -17,78 +17,73 @@
 package org.apache.kafka.streams.kstream.internals;
 
 import org.apache.kafka.streams.KeyValue;
-import org.apache.kafka.streams.kstream.KeyValueMapper;
-import org.apache.kafka.streams.processor.Processor;
-import org.apache.kafka.streams.processor.ProcessorContext;
-import org.easymock.EasyMock;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
+import org.apache.kafka.streams.processor.api.Record;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 
 import java.io.ByteArrayOutputStream;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
+@ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.STRICT_STUBS)
 public class KStreamPrintTest {
 
     private ByteArrayOutputStream byteOutStream;
+    private Processor<Integer, String, Void, Void> printProcessor;
 
-    private KeyValueMapper<Integer, String, String> mapper;
-    private KStreamPrint kStreamPrint;
-    private Processor printProcessor;
+    @Mock
+    private ProcessorContext<Void, Void> processorContext;
 
-    @Before
-    public void setUp() throws Exception {
+    @BeforeEach
+    public void setUp() {
         byteOutStream = new ByteArrayOutputStream();
 
-        mapper = new KeyValueMapper<Integer, String, String>() {
-            @Override
-            public String apply(final Integer key, final String value) {
-                return String.format("%d, %s", key, value);
-            }
-        };
-
-        kStreamPrint = new KStreamPrint<>(new PrintForeachAction<>(byteOutStream, mapper, "test-stream"));
+        final KStreamPrint<Integer, String> kStreamPrint = new KStreamPrint<>(new PrintForeachAction<>(
+            byteOutStream,
+            (key, value) -> String.format("%d, %s", key, value),
+            "test-stream"));
 
         printProcessor = kStreamPrint.get();
-        ProcessorContext processorContext = EasyMock.createNiceMock(ProcessorContext.class);
-        EasyMock.replay(processorContext);
 
         printProcessor.init(processorContext);
     }
 
     @Test
-    @SuppressWarnings("unchecked")
     public void testPrintStreamWithProvidedKeyValueMapper() {
-
         final List<KeyValue<Integer, String>> inputRecords = Arrays.asList(
                 new KeyValue<>(0, "zero"),
                 new KeyValue<>(1, "one"),
                 new KeyValue<>(2, "two"),
                 new KeyValue<>(3, "three"));
 
-        final String[] expectedResult = {"[test-stream]: 0, zero", "[test-stream]: 1, one", "[test-stream]: 2, two", "[test-stream]: 3, three"};
+        final String[] expectedResult = {
+            "[test-stream]: 0, zero",
+            "[test-stream]: 1, one",
+            "[test-stream]: 2, two",
+            "[test-stream]: 3, three"};
 
-        doTest(inputRecords, expectedResult);
-    }
+        for (final KeyValue<Integer, String> record: inputRecords) {
+            final Record<Integer, String> r = new Record<>(record.key, record.value, 0L);
+            printProcessor.process(r);
+        }
+        printProcessor.close();
 
-    private void assertFlushData(final String[] expectedResult, final ByteArrayOutputStream byteOutStream) {
-
-        final String[] flushOutDatas = new String(byteOutStream.toByteArray(), Charset.forName("UTF-8")).split("\\r*\\n");
+        final String[] flushOutDatas = new String(byteOutStream.toByteArray(), StandardCharsets.UTF_8).split("\\r*\\n");
         for (int i = 0; i < flushOutDatas.length; i++) {
             assertEquals(expectedResult[i], flushOutDatas[i]);
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private <K, V> void doTest(final List<KeyValue<K, V>> inputRecords, final String[] expectedResult) {
-
-        for (KeyValue<K, V> record: inputRecords) {
-            printProcessor.process(record.key, record.value);
-        }
-        printProcessor.close();
-        assertFlushData(expectedResult, byteOutStream);
-    }
 }

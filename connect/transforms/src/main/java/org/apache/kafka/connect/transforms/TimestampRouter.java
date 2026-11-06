@@ -17,6 +17,7 @@
 package org.apache.kafka.connect.transforms;
 
 import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.utils.internals.AppInfoParser;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.transforms.util.SimpleConfig;
@@ -25,8 +26,14 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Map;
 import java.util.TimeZone;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-public class TimestampRouter<R extends ConnectRecord<R>> implements Transformation<R> {
+public class TimestampRouter<R extends ConnectRecord<R>> implements Transformation<R>, AutoCloseable {
+
+    private static final Pattern TOPIC = Pattern.compile("${topic}", Pattern.LITERAL);
+
+    private static final Pattern TIMESTAMP = Pattern.compile("${timestamp}", Pattern.LITERAL);
 
     public static final String OVERVIEW_DOC =
             "Update the record's topic field as a function of the original topic value and the record timestamp."
@@ -49,20 +56,22 @@ public class TimestampRouter<R extends ConnectRecord<R>> implements Transformati
     private ThreadLocal<SimpleDateFormat> timestampFormat;
 
     @Override
+    public String version() {
+        return AppInfoParser.getVersion();
+    }
+
+    @Override
     public void configure(Map<String, ?> props) {
         final SimpleConfig config = new SimpleConfig(CONFIG_DEF, props);
 
         topicFormat = config.getString(ConfigName.TOPIC_FORMAT);
 
         final String timestampFormatStr = config.getString(ConfigName.TIMESTAMP_FORMAT);
-        timestampFormat = new ThreadLocal<SimpleDateFormat>() {
-            @Override
-            protected SimpleDateFormat initialValue() {
-                final SimpleDateFormat fmt = new SimpleDateFormat(timestampFormatStr);
-                fmt.setTimeZone(TimeZone.getTimeZone("UTC"));
-                return fmt;
-            }
-        };
+        timestampFormat = ThreadLocal.withInitial(() -> {
+            final SimpleDateFormat fmt = new SimpleDateFormat(timestampFormatStr);
+            fmt.setTimeZone(TimeZone.getTimeZone("UTC"));
+            return fmt;
+        });
     }
 
     @Override
@@ -72,7 +81,9 @@ public class TimestampRouter<R extends ConnectRecord<R>> implements Transformati
             throw new DataException("Timestamp missing on record: " + record);
         }
         final String formattedTimestamp = timestampFormat.get().format(new Date(timestamp));
-        final String updatedTopic = topicFormat.replace("${topic}", record.topic()).replace("${timestamp}", formattedTimestamp);
+
+        final String replace1 = TOPIC.matcher(topicFormat).replaceAll(Matcher.quoteReplacement(record.topic()));
+        final String updatedTopic = TIMESTAMP.matcher(replace1).replaceAll(Matcher.quoteReplacement(formattedTimestamp));
         return record.newRecord(
                 updatedTopic, record.kafkaPartition(),
                 record.keySchema(), record.key(),
@@ -83,7 +94,7 @@ public class TimestampRouter<R extends ConnectRecord<R>> implements Transformati
 
     @Override
     public void close() {
-        timestampFormat = null;
+        timestampFormat.remove();
     }
 
     @Override

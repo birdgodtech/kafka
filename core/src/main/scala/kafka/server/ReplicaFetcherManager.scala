@@ -17,22 +17,41 @@
 
 package kafka.server
 
-import kafka.cluster.BrokerEndPoint
+import org.apache.kafka.clients.FetchSessionHandler
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.utils.Time
+import org.apache.kafka.common.utils.internals.LogContext
+import org.apache.kafka.server.common.MetadataVersion
+import org.apache.kafka.server.network.BrokerEndPoint
+import org.apache.kafka.server.LeaderEndPoint
+import org.apache.kafka.server.quota.ReplicationQuotaManager
 
-class ReplicaFetcherManager(brokerConfig: KafkaConfig, protected val replicaManager: ReplicaManager, metrics: Metrics,
-                            time: Time, threadNamePrefix: Option[String] = None, quotaManager: ReplicationQuotaManager)
-      extends AbstractFetcherManager("ReplicaFetcherManager on broker " + brokerConfig.brokerId,
-        "Replica", brokerConfig.numReplicaFetchers) {
+class ReplicaFetcherManager(brokerConfig: KafkaConfig,
+                            protected val replicaManager: ReplicaManager,
+                            metrics: Metrics,
+                            time: Time,
+                            quotaManager: ReplicationQuotaManager,
+                            metadataVersionSupplier: () => MetadataVersion,
+                            brokerEpochSupplier: () => Long)
+      extends AbstractFetcherManager[ReplicaFetcherThread](
+        name = "ReplicaFetcherManager on broker " + brokerConfig.brokerId,
+        clientId = "Replica",
+        numFetchers = brokerConfig.numReplicaFetchers) {
 
-  override def createFetcherThread(fetcherId: Int, sourceBroker: BrokerEndPoint): AbstractFetcherThread = {
-    val prefix = threadNamePrefix.map(tp => s"${tp}:").getOrElse("")
-    val threadName = s"${prefix}ReplicaFetcherThread-$fetcherId-${sourceBroker.id}"
-    new ReplicaFetcherThread(threadName, fetcherId, sourceBroker, brokerConfig, replicaManager, metrics, time, quotaManager)
+  override def createFetcherThread(fetcherId: Int, sourceBroker: BrokerEndPoint): ReplicaFetcherThread = {
+    val threadName = s"ReplicaFetcherThread-$fetcherId-${sourceBroker.id}"
+    val logContext = new LogContext(s"[ReplicaFetcher replicaId=${brokerConfig.brokerId}, leaderId=${sourceBroker.id}, " +
+      s"fetcherId=$fetcherId] ")
+    val endpoint = new BrokerBlockingSender(sourceBroker, brokerConfig, metrics, time, fetcherId,
+      s"broker-${brokerConfig.brokerId}-fetcher-$fetcherId", logContext)
+    val fetchSessionHandler = new FetchSessionHandler(logContext, sourceBroker.id)
+    val leader: LeaderEndPoint = new RemoteLeaderEndPoint(logContext.logPrefix, endpoint, fetchSessionHandler, brokerConfig,
+      replicaManager, quotaManager, metadataVersionSupplier, brokerEpochSupplier)
+    new ReplicaFetcherThread(threadName, leader, brokerConfig, failedPartitions, replicaManager,
+      quotaManager, logContext.logPrefix)
   }
 
-  def shutdown() {
+  def shutdown(): Unit = {
     info("shutting down")
     closeAllFetchers()
     info("shutdown completed")

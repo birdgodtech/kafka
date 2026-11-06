@@ -16,7 +16,7 @@
  */
 package org.apache.kafka.common.internals;
 
-import org.apache.kafka.common.utils.Exit;
+import org.apache.kafka.common.utils.internals.Exit;
 
 /**
  * An error that indicates the need to exit the JVM process. This should only be used by the server or command-line
@@ -27,7 +27,7 @@ import org.apache.kafka.common.utils.Exit;
  */
 public class FatalExitError extends Error {
 
-    private final static long serialVersionUID = 1L;
+    private static final long serialVersionUID = 1L;
 
     private final int statusCode;
 

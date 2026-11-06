@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.streams.kstream;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.streams.KeyValue;
 
 /**
@@ -27,23 +28,25 @@ import org.apache.kafka.streams.KeyValue;
  * <li>map from an input record to a new key (with arbitrary key type as specified by {@code VR})</li>
  * </ul>
  * This is a stateless record-by-record operation, i.e, {@link #apply(Object, Object)} is invoked individually for each
- * record of a stream (cf. {@link Transformer} for stateful record transformation).
+ * record of a stream (cf. {@link org.apache.kafka.streams.processor.api.Processor api.Processor} for stateful record transformation).
  * {@code KeyValueMapper} is a generalization of {@link ValueMapper}.
  *
  * @param <K>  key type
  * @param <V>  value type
  * @param <VR> mapped value type
  * @see ValueMapper
- * @see Transformer
+ * @see org.apache.kafka.streams.processor.api.Processor
  * @see KStream#map(KeyValueMapper)
  * @see KStream#flatMap(KeyValueMapper)
  * @see KStream#selectKey(KeyValueMapper)
  * @see KStream#groupBy(KeyValueMapper)
- * @see KStream#groupBy(KeyValueMapper, Serialized)
+ * @see KStream#groupBy(KeyValueMapper, Grouped)
  * @see KTable#groupBy(KeyValueMapper)
- * @see KTable#groupBy(KeyValueMapper, Serialized)
+ * @see KTable#groupBy(KeyValueMapper, Grouped)
  * @see KTable#toStream(KeyValueMapper)
  */
+@FunctionalInterface
+@InterfaceAudience.Public
 public interface KeyValueMapper<K, V, VR> {
 
     /**

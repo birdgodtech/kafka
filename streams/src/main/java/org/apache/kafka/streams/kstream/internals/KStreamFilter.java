@@ -16,31 +16,32 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
-import org.apache.kafka.streams.processor.AbstractProcessor;
-import org.apache.kafka.streams.processor.Processor;
 import org.apache.kafka.streams.kstream.Predicate;
-import org.apache.kafka.streams.processor.ProcessorSupplier;
+import org.apache.kafka.streams.processor.api.ContextualFixedKeyProcessor;
+import org.apache.kafka.streams.processor.api.FixedKeyProcessor;
+import org.apache.kafka.streams.processor.api.FixedKeyProcessorSupplier;
+import org.apache.kafka.streams.processor.api.FixedKeyRecord;
 
-class KStreamFilter<K, V> implements ProcessorSupplier<K, V> {
+class KStreamFilter<K, V> implements FixedKeyProcessorSupplier<K, V, V> {
 
-    private final Predicate<K, V> predicate;
+    private final Predicate<? super K, ? super V> predicate;
     private final boolean filterNot;
 
-    public KStreamFilter(Predicate<K, V> predicate, boolean filterNot) {
+    public KStreamFilter(final Predicate<? super K, ? super V> predicate, final boolean filterNot) {
         this.predicate = predicate;
         this.filterNot = filterNot;
     }
 
     @Override
-    public Processor<K, V> get() {
+    public FixedKeyProcessor<K, V, V> get() {
         return new KStreamFilterProcessor();
     }
 
-    private class KStreamFilterProcessor extends AbstractProcessor<K, V> {
+    private class KStreamFilterProcessor extends ContextualFixedKeyProcessor<K, V, V> {
         @Override
-        public void process(K key, V value) {
-            if (filterNot ^ predicate.test(key, value)) {
-                context().forward(key, value);
+        public void process(final FixedKeyRecord<K, V> record) {
+            if (filterNot ^ predicate.test(record.key(), record.value())) {
+                context().forward(record);
             }
         }
     }

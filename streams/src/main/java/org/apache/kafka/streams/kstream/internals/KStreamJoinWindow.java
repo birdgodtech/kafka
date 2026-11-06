@@ -16,54 +16,58 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
-import org.apache.kafka.streams.errors.TopologyException;
-import org.apache.kafka.streams.processor.AbstractProcessor;
-import org.apache.kafka.streams.processor.Processor;
-import org.apache.kafka.streams.processor.ProcessorContext;
-import org.apache.kafka.streams.processor.ProcessorSupplier;
-import org.apache.kafka.streams.state.WindowStore;
+import org.apache.kafka.streams.processor.api.ContextualProcessor;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
+import org.apache.kafka.streams.processor.api.ProcessorSupplier;
+import org.apache.kafka.streams.processor.api.Record;
+import org.apache.kafka.streams.processor.internals.StoreFactory;
+import org.apache.kafka.streams.processor.internals.StoreFactory.FactoryWrappingStoreBuilder;
+import org.apache.kafka.streams.state.StoreBuilder;
+import org.apache.kafka.streams.state.TimestampedWindowStoreWithHeaders;
+import org.apache.kafka.streams.state.ValueTimestampHeaders;
 
-class KStreamJoinWindow<K, V> implements ProcessorSupplier<K, V> {
+import java.util.Set;
 
-    private final String windowName;
+class KStreamJoinWindow<K, V> implements ProcessorSupplier<K, V, K, V> {
 
-    /**
-     * @throws TopologyException if retention period of the join window is less than expected
-     */
-    KStreamJoinWindow(String windowName, long windowSizeMs, long retentionPeriodMs) {
-        this.windowName = windowName;
+    private final StoreFactory thisWindowStoreFactory;
 
-        if (windowSizeMs > retentionPeriodMs)
-            throw new TopologyException("The retention period of the join window "
-                    + windowName + " must be no smaller than its window size.");
+    KStreamJoinWindow(final StoreFactory thisWindowStoreFactory) {
+        this.thisWindowStoreFactory = thisWindowStoreFactory;
     }
 
     @Override
-    public Processor<K, V> get() {
+    public Set<StoreBuilder<?>> stores() {
+        return Set.of(new FactoryWrappingStoreBuilder<>(thisWindowStoreFactory));
+    }
+
+    @Override
+    public Processor<K, V, K, V> get() {
         return new KStreamJoinWindowProcessor();
     }
 
-    private class KStreamJoinWindowProcessor extends AbstractProcessor<K, V> {
+    private class KStreamJoinWindowProcessor extends ContextualProcessor<K, V, K, V> {
 
-        private WindowStore<K, V> window;
+        private TimestampedWindowStoreWithHeaders<K, V> window;
 
-        @SuppressWarnings("unchecked")
         @Override
-        public void init(ProcessorContext context) {
+        public void init(final ProcessorContext<K, V> context) {
             super.init(context);
-
-            window = (WindowStore<K, V>) context.getStateStore(windowName);
+            window = context.getStateStore(thisWindowStoreFactory.storeName());
         }
 
         @Override
-        public void process(K key, V value) {
+        public void process(final Record<K, V> record) {
             // if the key is null, we do not need to put the record into window store
             // since it will never be considered for join operations
-            if (key != null) {
-                context().forward(key, value);
-                window.put(key, value);
+            context().forward(record);
+            if (record.key() != null) {
+                // Every record basically starts a new window. We're using a window store mostly for the retention.
+                window.put(record.key(),
+                        ValueTimestampHeaders.make(record.value(), record.timestamp(), record.headers()),
+                        record.timestamp());
             }
         }
     }
-
 }

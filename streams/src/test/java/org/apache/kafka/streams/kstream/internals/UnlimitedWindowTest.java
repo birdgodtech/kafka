@@ -16,13 +16,14 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class UnlimitedWindowTest {
 
-    private long start = 50;
+    private final long start = 50;
     private final UnlimitedWindow window = new UnlimitedWindow(start);
     private final SessionWindow sessionWindow = new SessionWindow(start, start);
 
@@ -33,8 +34,8 @@ public class UnlimitedWindowTest {
         assertTrue(window.overlap(new UnlimitedWindow(start + 1)));
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void cannotCompareUnlimitedWindowWithDifferentWindowType() {
-        window.overlap(sessionWindow);
+        assertThrows(IllegalArgumentException.class, () -> window.overlap(sessionWindow));
     }
 }

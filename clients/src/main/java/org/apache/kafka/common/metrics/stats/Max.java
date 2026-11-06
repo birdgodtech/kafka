@@ -16,13 +16,15 @@
  */
 package org.apache.kafka.common.metrics.stats;
 
-import java.util.List;
-
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.metrics.MetricConfig;
+
+import java.util.List;
 
 /**
  * A {@link SampledStat} that gives the max over its samples.
  */
+@InterfaceAudience.Public
 public final class Max extends SampledStat {
 
     public Max() {
@@ -37,9 +39,12 @@ public final class Max extends SampledStat {
     @Override
     public double combine(List<Sample> samples, MetricConfig config, long now) {
         double max = Double.NEGATIVE_INFINITY;
-        for (Sample sample : samples)
+        long count = 0;
+        for (Sample sample : samples) {
             max = Math.max(max, sample.value);
-        return max;
+            count += sample.eventCount;
+        }
+        return count == 0 ? Double.NaN : max;
     }
 
 }

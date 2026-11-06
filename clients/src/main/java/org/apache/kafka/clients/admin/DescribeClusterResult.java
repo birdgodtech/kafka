@@ -19,27 +19,30 @@ package org.apache.kafka.clients.admin;
 
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.Node;
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.common.acl.AclOperation;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Collection;
+import java.util.Set;
 
 /**
  * The result of the {@link KafkaAdminClient#describeCluster()} call.
- *
- * The API of this class is evolving, see {@link AdminClient} for details.
  */
-@InterfaceStability.Evolving
+@InterfaceAudience.Public
 public class DescribeClusterResult {
     private final KafkaFuture<Collection<Node>> nodes;
     private final KafkaFuture<Node> controller;
     private final KafkaFuture<String> clusterId;
+    private final KafkaFuture<Set<AclOperation>> authorizedOperations;
 
     DescribeClusterResult(KafkaFuture<Collection<Node>> nodes,
                           KafkaFuture<Node> controller,
-                          KafkaFuture<String> clusterId) {
+                          KafkaFuture<String> clusterId,
+                          KafkaFuture<Set<AclOperation>> authorizedOperations) {
         this.nodes = nodes;
         this.controller = controller;
         this.clusterId = clusterId;
+        this.authorizedOperations = authorizedOperations;
     }
 
     /**
@@ -50,18 +53,27 @@ public class DescribeClusterResult {
     }
 
     /**
-     * Returns a future which yields the current controller id.
-     * Note that this may yield null, if the controller ID is not yet known.
+     * Returns a future which yields the current controller node.
+     * <p>
+     * When using {@link AdminClientConfig#BOOTSTRAP_SERVERS_CONFIG}, the controller refers to a random broker.
+     * When using {@link AdminClientConfig#BOOTSTRAP_CONTROLLERS_CONFIG}, it refers to the current voter leader.
      */
     public KafkaFuture<Node> controller() {
         return controller;
     }
 
     /**
-     * Returns a future which yields the current cluster id. The future value will be non-null if the
-     * broker version is 0.10.1.0 or higher and null otherwise.
+     * Returns a future which yields the current cluster id.
      */
     public KafkaFuture<String> clusterId() {
         return clusterId;
+    }
+
+    /**
+     * Returns a future which yields authorized operations.  The future value will be non-null if the
+     * broker supplied this information, and null otherwise.
+     */
+    public KafkaFuture<Set<AclOperation>> authorizedOperations() {
+        return authorizedOperations;
     }
 }

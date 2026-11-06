@@ -20,31 +20,51 @@ import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.streams.KeyValue;
-import org.apache.kafka.streams.StreamsMetrics;
 import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.streams.state.KeyValueIterator;
-import org.apache.kafka.streams.state.StateSerdes;
 
-class MeteredWindowedKeyValueIterator<K, V> implements KeyValueIterator<Windowed<K>, V> {
+import java.util.Set;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Function;
 
-    private final KeyValueIterator<Windowed<Bytes>, byte[]> iter;
-    private final Sensor sensor;
-    private final StreamsMetrics metrics;
-    private final StateSerdes<K, V> serdes;
+class MeteredWindowedKeyValueIterator<K, V> implements KeyValueIterator<Windowed<K>, V>, MeteredIterator {
+
+    final KeyValueIterator<Windowed<Bytes>, byte[]> iter;
+    private final Sensor operationSensor;
+    private final Sensor iteratorSensor;
+    final Function<byte[], K> deserializeKey;
+    final Function<byte[], V> deserializeValue;
     private final long startNs;
+    private final long startTimestampMs;
     private final Time time;
+    private final LongAdder numOpenIterators;
+    private final Set<MeteredIterator> openIterators;
 
     MeteredWindowedKeyValueIterator(final KeyValueIterator<Windowed<Bytes>, byte[]> iter,
-                                    final Sensor sensor,
-                                    final StreamsMetrics metrics,
-                                    final StateSerdes<K, V> serdes,
-                                    final Time time) {
+                                    final Sensor operationSensor,
+                                    final Sensor iteratorSensor,
+                                    final Function<byte[], K> deserializeKey,
+                                    final Function<byte[], V> deserializeValue,
+                                    final Time time,
+                                    final LongAdder numOpenIterators,
+                                    final Set<MeteredIterator> openIterators) {
         this.iter = iter;
-        this.sensor = sensor;
-        this.metrics = metrics;
-        this.serdes = serdes;
+        this.operationSensor = operationSensor;
+        this.iteratorSensor = iteratorSensor;
+        this.deserializeKey = deserializeKey;
+        this.deserializeValue = deserializeValue;
         this.startNs = time.nanoseconds();
+        this.startTimestampMs = time.milliseconds();
         this.time = time;
+        this.numOpenIterators = numOpenIterators;
+        this.openIterators = openIterators;
+        numOpenIterators.increment();
+        openIterators.add(this);
+    }
+
+    @Override
+    public long startTimestamp() {
+        return this.startTimestampMs;
     }
 
     @Override
@@ -55,17 +75,12 @@ class MeteredWindowedKeyValueIterator<K, V> implements KeyValueIterator<Windowed
     @Override
     public KeyValue<Windowed<K>, V> next() {
         final KeyValue<Windowed<Bytes>, byte[]> next = iter.next();
-        return KeyValue.pair(windowedKey(next.key), serdes.valueFrom(next.value));
+        return KeyValue.pair(windowedKey(next.key), deserializeValue.apply(next.value));
     }
 
     private Windowed<K> windowedKey(final Windowed<Bytes> bytesKey) {
-        final K key = serdes.keyFrom(bytesKey.key().get());
+        final K key = deserializeKey.apply(bytesKey.key().get());
         return new Windowed<>(key, bytesKey.window());
-    }
-
-    @Override
-    public void remove() {
-        iter.remove();
     }
 
     @Override
@@ -73,7 +88,11 @@ class MeteredWindowedKeyValueIterator<K, V> implements KeyValueIterator<Windowed
         try {
             iter.close();
         } finally {
-            metrics.recordLatency(sensor, startNs, time.nanoseconds());
+            final long duration = time.nanoseconds() - startNs;
+            operationSensor.record(duration);
+            iteratorSensor.record(duration);
+            numOpenIterators.decrement();
+            openIterators.remove(this);
         }
     }
 

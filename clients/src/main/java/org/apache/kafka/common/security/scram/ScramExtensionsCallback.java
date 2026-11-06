@@ -17,28 +17,31 @@
 
 package org.apache.kafka.common.security.scram;
 
-import javax.security.auth.callback.Callback;
-import java.util.Collections;
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
 import java.util.Map;
+
+import javax.security.auth.callback.Callback;
 
 /**
  * Optional callback used for SCRAM mechanisms if any extensions need to be set
  * in the SASL/SCRAM exchange.
  */
+@InterfaceAudience.Public
 public class ScramExtensionsCallback implements Callback {
-    private Map<String, String> extensions = Collections.emptyMap();
+    private Map<String, String> extensions = Map.of();
 
     /**
-     * Returns the extension names and values that are sent by the client to
+     * Returns map of the extension names and values that are sent by the client to
      * the server in the initial client SCRAM authentication message.
-     * Default is an empty map.
+     * Default is an empty unmodifiable map.
      */
     public Map<String, String> extensions() {
         return extensions;
     }
 
     /**
-     * Sets the SCRAM extensions on this callback.
+     * Sets the SCRAM extensions on this callback. Maps passed in should be unmodifiable
      */
     public void extensions(Map<String, String> extensions) {
         this.extensions = extensions;

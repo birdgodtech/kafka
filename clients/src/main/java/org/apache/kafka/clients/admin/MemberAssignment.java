@@ -14,18 +14,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.clients.admin;
 
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * A description of the assignments of a specific group member.
  */
+@InterfaceAudience.Public
 public class MemberAssignment {
     private final Set<TopicPartition> topicPartitions;
 
@@ -35,8 +38,7 @@ public class MemberAssignment {
      * @param topicPartitions List of topic partitions
      */
     public MemberAssignment(Set<TopicPartition> topicPartitions) {
-        this.topicPartitions = topicPartitions == null ? Collections.<TopicPartition>emptySet() :
-            Collections.unmodifiableSet(new HashSet<>(topicPartitions));
+        this.topicPartitions = topicPartitions == null ? Collections.emptySet() : Set.copyOf(topicPartitions);
     }
 
     @Override
@@ -46,7 +48,7 @@ public class MemberAssignment {
 
         MemberAssignment that = (MemberAssignment) o;
 
-        return topicPartitions != null ? topicPartitions.equals(that.topicPartitions) : that.topicPartitions == null;
+        return Objects.equals(topicPartitions, that.topicPartitions);
     }
 
     @Override
@@ -63,6 +65,6 @@ public class MemberAssignment {
 
     @Override
     public String toString() {
-        return "(topicPartitions=" + Utils.join(topicPartitions, ",") + ")";
+        return "(topicPartitions=" + topicPartitions.stream().map(TopicPartition::toString).collect(Collectors.joining(",")) + ")";
     }
 }

@@ -16,16 +16,14 @@
  */
 package org.apache.kafka.common.serialization;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.errors.SerializationException;
+import org.apache.kafka.common.header.Headers;
 
-import java.util.Map;
+import java.nio.ByteBuffer;
 
+@InterfaceAudience.Public
 public class DoubleDeserializer implements Deserializer<Double> {
-
-    @Override
-    public void configure(Map<String, ?> configs, boolean isKey) {
-        // nothing to do
-    }
 
     @Override
     public Double deserialize(String topic, byte[] data) {
@@ -44,7 +42,14 @@ public class DoubleDeserializer implements Deserializer<Double> {
     }
 
     @Override
-    public void close() {
-        // nothing to do
+    public Double deserialize(String topic, Headers headers, ByteBuffer data) {
+        if (data == null) {
+            return null;
+        }
+
+        if (data.remaining() != 8) {
+            throw new SerializationException("Size of data received by DoubleDeserializer is not 8");
+        }
+        return data.getDouble(data.position());
     }
 }

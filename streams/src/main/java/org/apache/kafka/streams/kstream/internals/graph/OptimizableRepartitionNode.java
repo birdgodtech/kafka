@@ -17,69 +17,75 @@
 
 package org.apache.kafka.streams.kstream.internals.graph;
 
-import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serde;
-import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.streams.processor.FailOnInvalidTimestamp;
+import org.apache.kafka.streams.processor.StreamPartitioner;
+import org.apache.kafka.streams.processor.internals.InternalTopicProperties;
 import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
 
-public class OptimizableRepartitionNode<K, V> extends BaseRepartitionNode {
+public class OptimizableRepartitionNode<K, V> extends BaseRepartitionNode<K, V> {
 
-    OptimizableRepartitionNode(final String nodeName,
-                               final String sourceName,
-                               final ProcessorParameters processorParameters,
-                               final Serde<K> keySerde,
-                               final Serde<V> valueSerde,
-                               final String sinkName,
-                               final String repartitionTopic) {
+    private OptimizableRepartitionNode(final String nodeName,
+                                       final String sourceName,
+                                       final ProcessorParameters<K, V, K, V> processorParameters,
+                                       final Serde<K> keySerde,
+                                       final Serde<V> valueSerde,
+                                       final String sinkName,
+                                       final String repartitionTopic,
+                                       final StreamPartitioner<K, V> partitioner) {
+        super(
+            nodeName,
+            sourceName,
+            processorParameters,
+            keySerde,
+            valueSerde,
+            sinkName,
+            repartitionTopic,
+            partitioner,
+            InternalTopicProperties.empty()
+        );
+    }
 
-        super(nodeName,
-              sourceName,
-              processorParameters,
-              keySerde,
-              valueSerde,
-              sinkName,
-              repartitionTopic);
+    public Serde<K> keySerde() {
+        return keySerde;
+    }
 
+    public Serde<V> valueSerde() {
+        return valueSerde;
+    }
+
+    public String repartitionTopic() {
+        return repartitionTopic;
     }
 
     @Override
-    Serializer<V> getValueSerializer() {
-        return valueSerde != null ? valueSerde.serializer() : null;
+    public String toString() {
+        return "OptimizableRepartitionNode{ " + super.toString() + " }";
     }
 
     @Override
-    Deserializer<V> getValueDeserializer() {
-        return  valueSerde != null ? valueSerde.deserializer() : null;
-    }
+    public void writeToTopology(final InternalTopologyBuilder topologyBuilder) {
+        topologyBuilder.addInternalTopic(repartitionTopic, internalTopicProperties);
 
+        processorParameters.addProcessorTo(topologyBuilder, parentNodeNames());
 
-    @Override
-    public void writeToTopology(InternalTopologyBuilder topologyBuilder) {
-        final Serializer<K> keySerializer = keySerde != null ? keySerde.serializer() : null;
-        final Deserializer<K> keyDeserializer = keySerde != null ? keySerde.deserializer() : null;
+        topologyBuilder.addSink(
+            sinkName,
+            repartitionTopic,
+            keySerializer(),
+            valueSerializer(),
+            partitioner,
+            processorParameters.processorName()
+        );
 
-
-
-        topologyBuilder.addInternalTopic(repartitionTopic);
-
-        topologyBuilder.addProcessor(processorParameters.processorName(),
-                                     processorParameters.processorSupplier(),
-                                     parentNode().nodeName());
-
-        topologyBuilder.addSink(sinkName,
-                                repartitionTopic,
-                                keySerializer,
-                                getValueSerializer(),
-                                null,
-                                processorParameters.processorName());
-
-        topologyBuilder.addSource(null,
-                                  sourceName,
-                                  new FailOnInvalidTimestamp(),
-                                  keyDeserializer,
-                                  getValueDeserializer(),
-                                  repartitionTopic);
+        topologyBuilder.addSource(
+            null,
+            sourceName,
+            new FailOnInvalidTimestamp(),
+            keyDeserializer(),
+            valueDeserializer(),
+            repartitionTopic
+        );
 
     }
 
@@ -87,67 +93,19 @@ public class OptimizableRepartitionNode<K, V> extends BaseRepartitionNode {
         return new OptimizableRepartitionNodeBuilder<>();
     }
 
-
-    public static final class OptimizableRepartitionNodeBuilder<K, V> {
-
-        private String nodeName;
-        private ProcessorParameters processorParameters;
-        private Serde<K> keySerde;
-        private Serde<V> valueSerde;
-        private String sinkName;
-        private String sourceName;
-        private String repartitionTopic;
-
-        private OptimizableRepartitionNodeBuilder() {
-        }
-
-        public OptimizableRepartitionNodeBuilder<K, V> withProcessorParameters(final ProcessorParameters processorParameters) {
-            this.processorParameters = processorParameters;
-            return this;
-        }
-
-        public OptimizableRepartitionNodeBuilder<K, V> withKeySerde(final Serde<K> keySerde) {
-            this.keySerde = keySerde;
-            return this;
-        }
-
-        public OptimizableRepartitionNodeBuilder<K, V> withValueSerde(final Serde<V> valueSerde) {
-            this.valueSerde = valueSerde;
-            return this;
-        }
-
-        public OptimizableRepartitionNodeBuilder<K, V> withSinkName(final String sinkName) {
-            this.sinkName = sinkName;
-            return this;
-        }
-
-        public OptimizableRepartitionNodeBuilder<K, V> withSourceName(final String sourceName) {
-            this.sourceName = sourceName;
-            return this;
-        }
-
-        public OptimizableRepartitionNodeBuilder<K, V> withRepartitionTopic(final String repartitionTopic) {
-            this.repartitionTopic = repartitionTopic;
-            return this;
-        }
-
-
-        public OptimizableRepartitionNodeBuilder<K, V> withNodeName(final String nodeName) {
-            this.nodeName = nodeName;
-            return this;
-        }
-
+    public static final class OptimizableRepartitionNodeBuilder<K, V> extends BaseRepartitionNodeBuilder<K, V, OptimizableRepartitionNode<K, V>> {
+        @Override
         public OptimizableRepartitionNode<K, V> build() {
-
-            return new OptimizableRepartitionNode<>(nodeName,
-                                                    sourceName,
-                                                    processorParameters,
-                                                    keySerde,
-                                                    valueSerde,
-                                                    sinkName,
-                                                    repartitionTopic
+            return new OptimizableRepartitionNode<>(
+                nodeName,
+                sourceName,
+                processorParameters,
+                keySerde,
+                valueSerde,
+                sinkName,
+                repartitionTopic,
+                partitioner
             );
-
         }
     }
 }

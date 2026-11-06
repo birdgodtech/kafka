@@ -16,261 +16,198 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.errors.InvalidConfigurationException;
+import org.apache.kafka.common.internals.Topic;
+import org.apache.kafka.common.internals.UnsupportedProtocolFieldException;
+import org.apache.kafka.common.message.JoinGroupRequestData;
+import org.apache.kafka.common.message.JoinGroupResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.ArrayOf;
-import org.apache.kafka.common.protocol.types.Field;
-import org.apache.kafka.common.protocol.types.Schema;
-import org.apache.kafka.common.protocol.types.Struct;
-import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.protocol.Readable;
 
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
-import static org.apache.kafka.common.protocol.CommonFields.GROUP_ID;
-import static org.apache.kafka.common.protocol.CommonFields.MEMBER_ID;
-import static org.apache.kafka.common.protocol.types.Type.BYTES;
-import static org.apache.kafka.common.protocol.types.Type.INT32;
-import static org.apache.kafka.common.protocol.types.Type.STRING;
 
 public class JoinGroupRequest extends AbstractRequest {
-    private static final String SESSION_TIMEOUT_KEY_NAME = "session_timeout";
-    private static final String REBALANCE_TIMEOUT_KEY_NAME = "rebalance_timeout";
-    private static final String PROTOCOL_TYPE_KEY_NAME = "protocol_type";
-    private static final String GROUP_PROTOCOLS_KEY_NAME = "group_protocols";
-    private static final String PROTOCOL_NAME_KEY_NAME = "protocol_name";
-    private static final String PROTOCOL_METADATA_KEY_NAME = "protocol_metadata";
-
-    /* Join group api */
-    private static final Schema JOIN_GROUP_REQUEST_PROTOCOL_V0 = new Schema(
-            new Field(PROTOCOL_NAME_KEY_NAME, STRING),
-            new Field(PROTOCOL_METADATA_KEY_NAME, BYTES));
-
-    private static final Schema JOIN_GROUP_REQUEST_V0 = new Schema(
-            GROUP_ID,
-            new Field(SESSION_TIMEOUT_KEY_NAME, INT32, "The coordinator considers the consumer dead if it receives " +
-                    "no heartbeat after this timeout in ms."),
-            MEMBER_ID,
-            new Field(PROTOCOL_TYPE_KEY_NAME, STRING, "Unique name for class of protocols implemented by group"),
-            new Field(GROUP_PROTOCOLS_KEY_NAME, new ArrayOf(JOIN_GROUP_REQUEST_PROTOCOL_V0), "List of protocols " +
-                    "that the member supports"));
-
-    private static final Schema JOIN_GROUP_REQUEST_V1 = new Schema(
-            GROUP_ID,
-            new Field(SESSION_TIMEOUT_KEY_NAME, INT32, "The coordinator considers the consumer dead if it receives no " +
-                    "heartbeat after this timeout in ms."),
-            new Field(REBALANCE_TIMEOUT_KEY_NAME, INT32, "The maximum time that the coordinator will wait for each " +
-                    "member to rejoin when rebalancing the group"),
-            MEMBER_ID,
-            new Field(PROTOCOL_TYPE_KEY_NAME, STRING, "Unique name for class of protocols implemented by group"),
-            new Field(GROUP_PROTOCOLS_KEY_NAME, new ArrayOf(JOIN_GROUP_REQUEST_PROTOCOL_V0), "List of protocols " +
-                    "that the member supports"));
-
-    /* v2 request is the same as v1. Throttle time has been added to response */
-    private static final Schema JOIN_GROUP_REQUEST_V2 = JOIN_GROUP_REQUEST_V1;
-
-    /**
-     * The version number is bumped to indicate that on quota violation brokers send out responses before throttling.
-     */
-    private static final Schema JOIN_GROUP_REQUEST_V3 = JOIN_GROUP_REQUEST_V2;
-
-    public static Schema[] schemaVersions() {
-        return new Schema[] {JOIN_GROUP_REQUEST_V0, JOIN_GROUP_REQUEST_V1, JOIN_GROUP_REQUEST_V2,
-            JOIN_GROUP_REQUEST_V3};
-    }
-
-    public static final String UNKNOWN_MEMBER_ID = "";
-
-    private final String groupId;
-    private final int sessionTimeout;
-    private final int rebalanceTimeout;
-    private final String memberId;
-    private final String protocolType;
-    private final List<ProtocolMetadata> groupProtocols;
-
-    public static class ProtocolMetadata {
-        private final String name;
-        private final ByteBuffer metadata;
-
-        public ProtocolMetadata(String name, ByteBuffer metadata) {
-            this.name = name;
-            this.metadata = metadata;
-        }
-
-        public String name() {
-            return name;
-        }
-
-        public ByteBuffer metadata() {
-            return metadata;
-        }
-    }
 
     public static class Builder extends AbstractRequest.Builder<JoinGroupRequest> {
-        private final String groupId;
-        private final int sessionTimeout;
-        private final String memberId;
-        private final String protocolType;
-        private final List<ProtocolMetadata> groupProtocols;
-        private int rebalanceTimeout = 0;
 
-        public Builder(String groupId, int sessionTimeout, String memberId,
-                       String protocolType, List<ProtocolMetadata> groupProtocols) {
+        private final JoinGroupRequestData data;
+
+        public Builder(JoinGroupRequestData data) {
             super(ApiKeys.JOIN_GROUP);
-            this.groupId = groupId;
-            this.sessionTimeout = sessionTimeout;
-            this.rebalanceTimeout = sessionTimeout;
-            this.memberId = memberId;
-            this.protocolType = protocolType;
-            this.groupProtocols = groupProtocols;
-        }
-
-        public Builder setRebalanceTimeout(int rebalanceTimeout) {
-            this.rebalanceTimeout = rebalanceTimeout;
-            return this;
+            this.data = data;
         }
 
         @Override
         public JoinGroupRequest build(short version) {
-            if (version < 1) {
-                // v0 had no rebalance timeout but used session timeout implicitly
-                rebalanceTimeout = sessionTimeout;
+            if (data.groupInstanceId() != null && version < 5) {
+                throw new UnsupportedProtocolFieldException("GroupInstanceId", apiKey().name(), version, 5);
             }
-            return new JoinGroupRequest(version, groupId, sessionTimeout,
-                    rebalanceTimeout, memberId, protocolType, groupProtocols);
+            return new JoinGroupRequest(data, version);
         }
 
         @Override
         public String toString() {
-            StringBuilder bld = new StringBuilder();
-            bld.append("(type: JoinGroupRequest").
-                append(", groupId=").append(groupId).
-                append(", sessionTimeout=").append(sessionTimeout).
-                append(", rebalanceTimeout=").append(rebalanceTimeout).
-                append(", memberId=").append(memberId).
-                append(", protocolType=").append(protocolType).
-                append(", groupProtocols=").append(Utils.join(groupProtocols, ", ")).
-                append(")");
-            return bld.toString();
+            return data.toString();
         }
     }
 
-    private JoinGroupRequest(short version, String groupId, int sessionTimeout,
-            int rebalanceTimeout, String memberId, String protocolType,
-            List<ProtocolMetadata> groupProtocols) {
-        super(version);
-        this.groupId = groupId;
-        this.sessionTimeout = sessionTimeout;
-        this.rebalanceTimeout = rebalanceTimeout;
-        this.memberId = memberId;
-        this.protocolType = protocolType;
-        this.groupProtocols = groupProtocols;
+    private final JoinGroupRequestData data;
+
+    public static final String UNKNOWN_MEMBER_ID = "";
+    public static final int UNKNOWN_GENERATION_ID = -1;
+    public static final String UNKNOWN_PROTOCOL_NAME = "";
+
+    /**
+     * Ported from class Topic in {@link org.apache.kafka.common.internals} to restrict the charset for
+     * static member id.
+     */
+    public static void validateGroupInstanceId(String id) {
+        Topic.validate(id, "Group instance id", message -> {
+            throw new InvalidConfigurationException(message);
+        });
     }
 
-    public JoinGroupRequest(Struct struct, short versionId) {
-        super(versionId);
-
-        groupId = struct.get(GROUP_ID);
-        sessionTimeout = struct.getInt(SESSION_TIMEOUT_KEY_NAME);
-
-        if (struct.hasField(REBALANCE_TIMEOUT_KEY_NAME))
-            // rebalance timeout is added in v1
-            rebalanceTimeout = struct.getInt(REBALANCE_TIMEOUT_KEY_NAME);
-        else
-            // v0 had no rebalance timeout but used session timeout implicitly
-            rebalanceTimeout = sessionTimeout;
-
-        memberId = struct.get(MEMBER_ID);
-        protocolType = struct.getString(PROTOCOL_TYPE_KEY_NAME);
-
-        groupProtocols = new ArrayList<>();
-        for (Object groupProtocolObj : struct.getArray(GROUP_PROTOCOLS_KEY_NAME)) {
-            Struct groupProtocolStruct = (Struct) groupProtocolObj;
-            String name = groupProtocolStruct.getString(PROTOCOL_NAME_KEY_NAME);
-            ByteBuffer metadata = groupProtocolStruct.getBytes(PROTOCOL_METADATA_KEY_NAME);
-            groupProtocols.add(new ProtocolMetadata(name, metadata));
+    /**
+     * Ensures that the provided {@code reason} remains within a range of 255 chars.
+     * @param reason This is the reason that is sent to the broker over the wire
+     *               as a part of {@code JoinGroupRequest} or {@code LeaveGroupRequest} messages.
+     * @return a provided reason as is or truncated reason if it exceeds the 255 chars threshold.
+     */
+    public static String maybeTruncateReason(final String reason) {
+        if (reason.length() > 255) {
+            return reason.substring(0, 255);
+        } else {
+            return reason;
         }
+    }
+
+    /**
+     * Since JoinGroupRequest version 4, a client that sends a join group request with
+     * {@link #UNKNOWN_MEMBER_ID} needs to rejoin with a new member id generated
+     * by the server. Once the second join group request is complete, the client is
+     * added as a new member of the group.
+     *
+     * Prior to version 4, a client is immediately added as a new member if it sends a
+     * join group request with UNKNOWN_MEMBER_ID.
+     *
+     * @param apiVersion The JoinGroupRequest api version.
+     *
+     * @return whether a known member id is required or not.
+     */
+    public static boolean requiresKnownMemberId(int apiVersion) {
+        return apiVersion >= 4;
+    }
+
+
+    /**
+     * Since JoinGroupRequest version 4, a client that sends a join group request with
+     * {@link #UNKNOWN_MEMBER_ID} needs to rejoin with a new member id generated
+     * by the server. Once the second join group request is complete, the client is
+     * added as a new member of the group.
+     *
+     * Prior to version 4, a client is immediately added as a new member if it sends a
+     * join group request with UNKNOWN_MEMBER_ID.
+     *
+     * @param request    The request.
+     * @param apiVersion The JoinGroupRequest api version.
+     *
+     * @return whether a known member id is required or not.
+     */
+    public static boolean requiresKnownMemberId(
+        JoinGroupRequestData request,
+        int apiVersion
+    ) {
+        return request.groupInstanceId() == null
+            && request.memberId().equals(UNKNOWN_MEMBER_ID)
+            && requiresKnownMemberId(apiVersion);
+    }
+
+    /**
+     * Starting from version 9 of the JoinGroup API, static members are able to
+     * skip running the assignor based on the `SkipAssignment` field. We leverage
+     * this to tell the leader that it is the leader of the group but by skipping
+     * running the assignor while the group is in stable state.
+     * Notes:
+     * 1) This allows the leader to continue monitoring metadata changes for the
+     * group. Note that any metadata changes happening while the static leader is
+     * down won't be noticed.
+     * 2) The assignors are not idempotent nor free from side effects. This is why
+     * we skip entirely the assignment step as it could generate a different group
+     * assignment which would be ignored by the group coordinator because the group
+     * is the stable state.
+     *
+     * Prior to version 9 of the JoinGroup API, we wanted to avoid current leader
+     * performing trivial assignment while the group is in stable stage, because
+     * the new assignment in leader's next sync call won't be broadcast by a stable group.
+     * This could be guaranteed by always returning the old leader id so that the current
+     * leader won't assume itself as a leader based on the returned message, since the new
+     * member.id won't match returned leader id, therefore no assignment will be performed.
+     *
+     * @param apiVersion The JoinGroupRequest api version.
+     *
+     * @return whether the version supports skipping assignment.
+     */
+
+    public static boolean supportsSkippingAssignment(int apiVersion) {
+        return apiVersion >= 9;
+    }
+
+    /**
+     * Get the client's join reason.
+     *
+     * @param request The JoinGroupRequest.
+     *
+     * @return The join reason.
+     */
+    public static String joinReason(JoinGroupRequestData request) {
+        String joinReason = request.reason();
+        if (joinReason == null || joinReason.isEmpty()) {
+            joinReason = "not provided";
+        }
+        return joinReason;
+    }
+
+    public JoinGroupRequest(JoinGroupRequestData data, short version) {
+        super(ApiKeys.JOIN_GROUP, version);
+        this.data = data;
+        maybeOverrideRebalanceTimeout(version);
+    }
+
+    private void maybeOverrideRebalanceTimeout(short version) {
+        if (version == 0) {
+            // Version 0 has no rebalance timeout, so we use the session timeout
+            // to be consistent with the original behavior of the API.
+            data.setRebalanceTimeoutMs(data.sessionTimeoutMs());
+        }
+    }
+
+    @Override
+    public JoinGroupRequestData data() {
+        return data;
     }
 
     @Override
     public AbstractResponse getErrorResponse(int throttleTimeMs, Throwable e) {
-        short versionId = version();
-        switch (versionId) {
-            case 0:
-            case 1:
-                return new JoinGroupResponse(
-                        Errors.forException(e),
-                        JoinGroupResponse.UNKNOWN_GENERATION_ID,
-                        JoinGroupResponse.UNKNOWN_PROTOCOL,
-                        JoinGroupResponse.UNKNOWN_MEMBER_ID, // memberId
-                        JoinGroupResponse.UNKNOWN_MEMBER_ID, // leaderId
-                        Collections.<String, ByteBuffer>emptyMap());
-            case 2:
-            case 3:
-                return new JoinGroupResponse(
-                        throttleTimeMs,
-                        Errors.forException(e),
-                        JoinGroupResponse.UNKNOWN_GENERATION_ID,
-                        JoinGroupResponse.UNKNOWN_PROTOCOL,
-                        JoinGroupResponse.UNKNOWN_MEMBER_ID, // memberId
-                        JoinGroupResponse.UNKNOWN_MEMBER_ID, // leaderId
-                        Collections.<String, ByteBuffer>emptyMap());
+        JoinGroupResponseData data = new JoinGroupResponseData()
+            .setThrottleTimeMs(throttleTimeMs)
+            .setErrorCode(Errors.forException(e).code())
+            .setGenerationId(UNKNOWN_GENERATION_ID)
+            .setProtocolName(UNKNOWN_PROTOCOL_NAME)
+            .setLeader(UNKNOWN_MEMBER_ID)
+            .setMemberId(UNKNOWN_MEMBER_ID)
+            .setMembers(List.of());
 
-            default:
-                throw new IllegalArgumentException(String.format("Version %d is not valid. Valid versions for %s are 0 to %d",
-                        versionId, this.getClass().getSimpleName(), ApiKeys.JOIN_GROUP.latestVersion()));
-        }
+        if (version() >= 7)
+            data.setProtocolName(null);
+        else
+            data.setProtocolName(UNKNOWN_PROTOCOL_NAME);
+
+        return new JoinGroupResponse(data, version());
     }
 
-    public String groupId() {
-        return groupId;
-    }
-
-    public int sessionTimeout() {
-        return sessionTimeout;
-    }
-
-    public int rebalanceTimeout() {
-        return rebalanceTimeout;
-    }
-
-    public String memberId() {
-        return memberId;
-    }
-
-    public List<ProtocolMetadata> groupProtocols() {
-        return groupProtocols;
-    }
-
-    public String protocolType() {
-        return protocolType;
-    }
-
-    public static JoinGroupRequest parse(ByteBuffer buffer, short version) {
-        return new JoinGroupRequest(ApiKeys.JOIN_GROUP.parseRequest(version, buffer), version);
-    }
-
-    @Override
-    protected Struct toStruct() {
-        short version = version();
-        Struct struct = new Struct(ApiKeys.JOIN_GROUP.requestSchema(version));
-        struct.set(GROUP_ID, groupId);
-        struct.set(SESSION_TIMEOUT_KEY_NAME, sessionTimeout);
-        if (version >= 1) {
-            struct.set(REBALANCE_TIMEOUT_KEY_NAME, rebalanceTimeout);
-        }
-        struct.set(MEMBER_ID, memberId);
-        struct.set(PROTOCOL_TYPE_KEY_NAME, protocolType);
-        List<Struct> groupProtocolsList = new ArrayList<>(groupProtocols.size());
-        for (ProtocolMetadata protocol : groupProtocols) {
-            Struct protocolStruct = struct.instance(GROUP_PROTOCOLS_KEY_NAME);
-            protocolStruct.set(PROTOCOL_NAME_KEY_NAME, protocol.name);
-            protocolStruct.set(PROTOCOL_METADATA_KEY_NAME, protocol.metadata);
-            groupProtocolsList.add(protocolStruct);
-        }
-        struct.set(GROUP_PROTOCOLS_KEY_NAME, groupProtocolsList.toArray());
-        return struct;
+    public static JoinGroupRequest parse(Readable readable, short version) {
+        return new JoinGroupRequest(new JoinGroupRequestData(readable, version), version);
     }
 }

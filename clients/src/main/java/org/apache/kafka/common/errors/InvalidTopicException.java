@@ -14,7 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.errors;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * The client has attempted to perform an operation on an invalid topic.
@@ -23,24 +29,43 @@ package org.apache.kafka.common.errors;
  *
  * @see UnknownTopicOrPartitionException
  */
-public class InvalidTopicException extends ApiException {
-
+@InterfaceAudience.Public
+public class InvalidTopicException extends InvalidConfigurationException {
     private static final long serialVersionUID = 1L;
+
+    private final Set<String> invalidTopics;
 
     public InvalidTopicException() {
         super();
+        invalidTopics = new HashSet<>();
     }
 
     public InvalidTopicException(String message, Throwable cause) {
         super(message, cause);
+        invalidTopics = new HashSet<>();
     }
 
     public InvalidTopicException(String message) {
         super(message);
+        invalidTopics = new HashSet<>();
     }
 
     public InvalidTopicException(Throwable cause) {
         super(cause);
+        invalidTopics = new HashSet<>();
     }
 
+    public InvalidTopicException(Set<String> invalidTopics) {
+        super("Invalid topics: " + invalidTopics);
+        this.invalidTopics = invalidTopics;
+    }
+
+    public InvalidTopicException(String message, Set<String> invalidTopics) {
+        super(message);
+        this.invalidTopics = invalidTopics;
+    }
+
+    public Set<String> invalidTopics() {
+        return invalidTopics;
+    }
 }

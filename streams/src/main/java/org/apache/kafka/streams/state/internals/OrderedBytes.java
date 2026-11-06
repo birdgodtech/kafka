@@ -29,29 +29,41 @@ class OrderedBytes {
      *
      * Assumes the minimum key length is one byte
      */
-    static Bytes upperRange(Bytes key, byte[] maxSuffix) {
+    static Bytes upperRange(final Bytes key, final byte[] maxSuffix) {
         final byte[] bytes = key.get();
-        ByteBuffer rangeEnd = ByteBuffer.allocate(bytes.length + maxSuffix.length);
+        final ByteBuffer rangeEnd = ByteBuffer.allocate(bytes.length + maxSuffix.length);
+        final int firstTimestampByte = maxSuffix[0] & 0xFF;
 
-        int i = 0;
-        while (i < bytes.length && (
-            i < MIN_KEY_LENGTH // assumes keys are at least one byte long
-            || (bytes[i] & 0xFF) >= (maxSuffix[0] & 0xFF)
-            )) {
-            rangeEnd.put(bytes[i++]);
+        // if firstTimestampByte is 0, we'll put all key bytes into range result because `(bytes[i] & 0xFF) >= firstTimestampByte`
+        // will always be true (this is a byte to unsigned int conversion comparison)
+        if (firstTimestampByte == 0) {
+            return Bytes.wrap(
+                rangeEnd
+                    .put(bytes)
+                    .put(maxSuffix)
+                    .array()
+            );
+        } else {
+            int i = 0;
+            while (i < bytes.length && (
+                i < MIN_KEY_LENGTH // assumes keys are at least one byte long
+                || (bytes[i] & 0xFF) >= firstTimestampByte
+                )) {
+                rangeEnd.put(bytes[i++]);
+            }
+
+            rangeEnd.put(maxSuffix);
+            rangeEnd.flip();
+
+            final byte[] res = new byte[rangeEnd.remaining()];
+            ByteBuffer.wrap(res).put(rangeEnd);
+            return Bytes.wrap(res);
         }
-
-        rangeEnd.put(maxSuffix);
-        rangeEnd.flip();
-
-        byte[] res = new byte[rangeEnd.remaining()];
-        ByteBuffer.wrap(res).put(rangeEnd);
-        return Bytes.wrap(res);
     }
 
-    static Bytes lowerRange(Bytes key, byte[] minSuffix) {
+    static Bytes lowerRange(final Bytes key, final byte[] minSuffix) {
         final byte[] bytes = key.get();
-        ByteBuffer rangeStart = ByteBuffer.allocate(bytes.length + minSuffix.length);
+        final ByteBuffer rangeStart = ByteBuffer.allocate(bytes.length + minSuffix.length);
         // any key in the range would start at least with the given prefix to be
         // in the range, and have at least SUFFIX_SIZE number of trailing zero bytes.
 

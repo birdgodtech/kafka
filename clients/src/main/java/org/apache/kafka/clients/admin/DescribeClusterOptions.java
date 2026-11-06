@@ -17,18 +17,20 @@
 
 package org.apache.kafka.clients.admin;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 /**
- * Options for {@link AdminClient#describeCluster()}.
- *
- * The API of this class is evolving, see {@link AdminClient} for details.
+ * Options for {@link Admin#describeCluster()}.
  */
-@InterfaceStability.Evolving
+@InterfaceAudience.Public
 public class DescribeClusterOptions extends AbstractOptions<DescribeClusterOptions> {
 
+    private boolean includeAuthorizedOperations;
+
+    private boolean includeFencedBrokers;
+
     /**
-     * Set the request timeout in milliseconds for this operation or {@code null} if the default request timeout for the
+     * Set the timeout in milliseconds for this operation or {@code null} if the default api timeout for the
      * AdminClient should be used.
      *
      */
@@ -38,4 +40,29 @@ public class DescribeClusterOptions extends AbstractOptions<DescribeClusterOptio
         return this;
     }
 
+    public DescribeClusterOptions includeAuthorizedOperations(boolean includeAuthorizedOperations) {
+        this.includeAuthorizedOperations = includeAuthorizedOperations;
+        return this;
+    }
+
+    public DescribeClusterOptions includeFencedBrokers(boolean includeFencedBrokers) {
+        this.includeFencedBrokers = includeFencedBrokers;
+        return this;
+    }
+
+    /**
+     * Specify if authorized operations should be included in the response.  Note that some
+     * older brokers cannot supply this information even if it is requested.
+     */
+    public boolean includeAuthorizedOperations() {
+        return includeAuthorizedOperations;
+    }
+
+    /**
+     * Specify if fenced brokers should be included in the response.  Note that some
+     * older brokers cannot supply this information even if it is requested.
+     */
+    public boolean includeFencedBrokers() {
+        return includeFencedBrokers;
+    }
 }

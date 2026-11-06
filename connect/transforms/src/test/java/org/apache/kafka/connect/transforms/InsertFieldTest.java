@@ -16,34 +16,51 @@
  */
 package org.apache.kafka.connect.transforms;
 
+import org.apache.kafka.common.utils.internals.AppInfoParser;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.source.SourceRecord;
-import org.junit.After;
-import org.junit.Test;
 
-import java.util.Collections;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.stream.Stream;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertSame;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class InsertFieldTest {
-    private InsertField<SourceRecord> xform = new InsertField.Value<>();
+    private final InsertField<SourceRecord> xformKey = new InsertField.Key<>();
+    private final InsertField<SourceRecord> xformValue = new InsertField.Value<>();
 
-    @After
-    public void teardown() {
-        xform.close();
+    public static Stream<Arguments> data() {
+        return Stream.of(
+                Arguments.of(false, null),
+                Arguments.of(true, 42L)
+        );
     }
 
-    @Test(expected = DataException.class)
+    @AfterEach
+    public void teardown() {
+        xformValue.close();
+    }
+
+    @Test
     public void topLevelStructRequired() {
-        xform.configure(Collections.singletonMap("topic.field", "topic_field"));
-        xform.apply(new SourceRecord(null, null, "", 0, Schema.INT32_SCHEMA, 42));
+        xformValue.configure(Map.of("topic.field", "topic_field"));
+        assertThrows(DataException.class,
+            () -> xformValue.apply(new SourceRecord(null, null, "", 0, Schema.INT32_SCHEMA, 42)));
     }
 
     @Test
@@ -55,13 +72,13 @@ public class InsertFieldTest {
         props.put("static.field", "instance_id");
         props.put("static.value", "my-instance-id");
 
-        xform.configure(props);
+        xformValue.configure(props);
 
         final Schema simpleStructSchema = SchemaBuilder.struct().name("name").version(1).doc("doc").field("magic", Schema.OPTIONAL_INT64_SCHEMA).build();
         final Struct simpleStruct = new Struct(simpleStructSchema).put("magic", 42L);
 
-        final SourceRecord record = new SourceRecord(null, null, "test", 0, simpleStructSchema, simpleStruct);
-        final SourceRecord transformedRecord = xform.apply(record);
+        final SourceRecord record = new SourceRecord(null, null, "test", 0, null, null, simpleStructSchema, simpleStruct, 789L);
+        final SourceRecord transformedRecord = xformValue.apply(record);
 
         assertEquals(simpleStructSchema.name(), transformedRecord.valueSchema().name());
         assertEquals(simpleStructSchema.version(), transformedRecord.valueSchema().version());
@@ -77,13 +94,13 @@ public class InsertFieldTest {
         assertEquals(0, ((Struct) transformedRecord.value()).getInt32("partition_field").intValue());
 
         assertEquals(Timestamp.builder().optional().build(), transformedRecord.valueSchema().field("timestamp_field").schema());
-        assertEquals(null, ((Struct) transformedRecord.value()).getInt64("timestamp_field"));
+        assertEquals(789L, ((Date) ((Struct) transformedRecord.value()).get("timestamp_field")).getTime());
 
         assertEquals(Schema.OPTIONAL_STRING_SCHEMA, transformedRecord.valueSchema().field("instance_id").schema());
         assertEquals("my-instance-id", ((Struct) transformedRecord.value()).getString("instance_id"));
 
         // Exercise caching
-        final SourceRecord transformedRecord2 = xform.apply(
+        final SourceRecord transformedRecord2 = xformValue.apply(
                 new SourceRecord(null, null, "test", 1, simpleStructSchema, new Struct(simpleStructSchema)));
         assertSame(transformedRecord.valueSchema(), transformedRecord2.valueSchema());
     }
@@ -97,18 +114,141 @@ public class InsertFieldTest {
         props.put("static.field", "instance_id");
         props.put("static.value", "my-instance-id");
 
-        xform.configure(props);
+        xformValue.configure(props);
 
         final SourceRecord record = new SourceRecord(null, null, "test", 0,
-                null, Collections.singletonMap("magic", 42L));
+                null, null, null, Map.of("magic", 42L), 123L);
 
-        final SourceRecord transformedRecord = xform.apply(record);
+        final SourceRecord transformedRecord = xformValue.apply(record);
 
-        assertEquals(42L, ((Map) transformedRecord.value()).get("magic"));
-        assertEquals("test", ((Map) transformedRecord.value()).get("topic_field"));
-        assertEquals(0, ((Map) transformedRecord.value()).get("partition_field"));
-        assertEquals(null, ((Map) transformedRecord.value()).get("timestamp_field"));
-        assertEquals("my-instance-id", ((Map) transformedRecord.value()).get("instance_id"));
+        assertEquals(42L, ((Map<?, ?>) transformedRecord.value()).get("magic"));
+        assertEquals("test", ((Map<?, ?>) transformedRecord.value()).get("topic_field"));
+        assertEquals(0, ((Map<?, ?>) transformedRecord.value()).get("partition_field"));
+        assertEquals(123L, ((Map<?, ?>) transformedRecord.value()).get("timestamp_field"));
+        assertEquals("my-instance-id", ((Map<?, ?>) transformedRecord.value()).get("instance_id"));
+    }
+
+    @Test
+    public void insertConfiguredFieldsIntoTombstoneEventWithoutSchemaLeavesValueUnchanged() {
+        final Map<String, Object> props = new HashMap<>();
+        props.put("topic.field", "topic_field!");
+        props.put("partition.field", "partition_field");
+        props.put("timestamp.field", "timestamp_field?");
+        props.put("static.field", "instance_id");
+        props.put("static.value", "my-instance-id");
+
+        xformValue.configure(props);
+
+        final SourceRecord record = new SourceRecord(null, null, "test", 0,
+                null, null);
+
+        final SourceRecord transformedRecord = xformValue.apply(record);
+
+        assertNull(transformedRecord.value());
+        assertNull(transformedRecord.valueSchema());
+    }
+
+    @Test
+    public void insertConfiguredFieldsIntoTombstoneEventWithSchemaLeavesValueUnchanged() {
+        final Map<String, Object> props = new HashMap<>();
+        props.put("topic.field", "topic_field!");
+        props.put("partition.field", "partition_field");
+        props.put("timestamp.field", "timestamp_field?");
+        props.put("static.field", "instance_id");
+        props.put("static.value", "my-instance-id");
+
+        xformValue.configure(props);
+
+        final Schema simpleStructSchema = SchemaBuilder.struct().name("name").version(1).doc("doc").field("magic", Schema.OPTIONAL_INT64_SCHEMA).build();
+
+        final SourceRecord record = new SourceRecord(null, null, "test", 0,
+                simpleStructSchema, null);
+
+        final SourceRecord transformedRecord = xformValue.apply(record);
+
+        assertNull(transformedRecord.value());
+        assertEquals(simpleStructSchema, transformedRecord.valueSchema());
+    }
+
+    @Test
+    public void insertKeyFieldsIntoTombstoneEvent() {
+        final Map<String, Object> props = new HashMap<>();
+        props.put("topic.field", "topic_field!");
+        props.put("partition.field", "partition_field");
+        props.put("timestamp.field", "timestamp_field?");
+        props.put("static.field", "instance_id");
+        props.put("static.value", "my-instance-id");
+
+        xformKey.configure(props);
+
+        final SourceRecord record = new SourceRecord(null, null, "test", 0,
+            null, Map.of("magic", 42L), null, null);
+
+        final SourceRecord transformedRecord = xformKey.apply(record);
+
+        assertEquals(42L, ((Map<?, ?>) transformedRecord.key()).get("magic"));
+        assertEquals("test", ((Map<?, ?>) transformedRecord.key()).get("topic_field"));
+        assertEquals(0, ((Map<?, ?>) transformedRecord.key()).get("partition_field"));
+        assertNull(((Map<?, ?>) transformedRecord.key()).get("timestamp_field"));
+        assertEquals("my-instance-id", ((Map<?, ?>) transformedRecord.key()).get("instance_id"));
+        assertNull(transformedRecord.value());
+    }
+
+    @Test
+    public void insertIntoNullKeyLeavesRecordUnchanged() {
+        final Map<String, Object> props = new HashMap<>();
+        props.put("topic.field", "topic_field!");
+        props.put("partition.field", "partition_field");
+        props.put("timestamp.field", "timestamp_field?");
+        props.put("static.field", "instance_id");
+        props.put("static.value", "my-instance-id");
+
+        xformKey.configure(props);
+
+        final SourceRecord record = new SourceRecord(null, null, "test", 0,
+            null, null, null, Map.of("magic", 42L));
+
+        final SourceRecord transformedRecord = xformKey.apply(record);
+
+        assertSame(record, transformedRecord);
+    }
+
+    @Test
+    public void testInsertFieldVersionRetrievedFromAppInfoParser() {
+        assertEquals(AppInfoParser.getVersion(), xformKey.version());
+        assertEquals(AppInfoParser.getVersion(), xformValue.version());
+
+        assertEquals(xformKey.version(), xformValue.version());
+    }
+
+    @ParameterizedTest
+    @MethodSource("data")
+    public void testUnsetOptionalField(boolean replaceNullWithDefault, Object expectedValue) {
+
+        final Map<String, Object> props = new HashMap<>();
+        props.put("topic.field", "topic_field!");
+        props.put("partition.field", "partition_field");
+        props.put("timestamp.field", "timestamp_field?");
+        props.put("static.field", "instance_id");
+        props.put("static.value", "my-instance-id");
+        props.put("replace.null.with.default", replaceNullWithDefault);
+
+        xformValue.configure(props);
+
+        Schema magicFieldSchema = SchemaBuilder.int64().optional().defaultValue(42L).build();
+        final Schema simpleStructSchema = SchemaBuilder.struct().name("name").version(1).doc("doc").field("magic_with_default", magicFieldSchema).build();
+        final Struct simpleStruct = new Struct(simpleStructSchema).put("magic_with_default", null);
+
+        final SourceRecord record = new SourceRecord(null, null, "test", 0, null, null, simpleStructSchema, simpleStruct, 789L);
+        final SourceRecord transformedRecord = xformValue.apply(record);
+
+        assertEquals(simpleStructSchema.name(), transformedRecord.valueSchema().name());
+        assertEquals(simpleStructSchema.version(), transformedRecord.valueSchema().version());
+        assertEquals(simpleStructSchema.doc(), transformedRecord.valueSchema().doc());
+
+        assertEquals(magicFieldSchema, transformedRecord.valueSchema().field("magic_with_default").schema());
+        assertEquals(expectedValue, ((Struct) transformedRecord.value()).getInt64("magic_with_default"));
+
     }
 
 }

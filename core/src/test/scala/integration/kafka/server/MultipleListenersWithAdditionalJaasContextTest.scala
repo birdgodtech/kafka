@@ -17,10 +17,14 @@
   */
 package kafka.server
 
-import java.util.Properties
+import org.apache.kafka.security.JaasTestUtils.JaasSection
+import org.apache.kafka.security.JaasTestUtils
 
-import kafka.utils.JaasTestUtils
-import kafka.utils.JaasTestUtils.JaasSection
+import java.util.Properties
+import scala.collection.Seq
+import scala.jdk.OptionConverters._
+import scala.jdk.CollectionConverters._
+
 
 class MultipleListenersWithAdditionalJaasContextTest extends MultipleListenersWithSameSecurityProtocolBaseTest {
 
@@ -28,15 +32,14 @@ class MultipleListenersWithAdditionalJaasContextTest extends MultipleListenersWi
 
   override def staticJaasSections: Seq[JaasSection] = {
     val (serverKeytabFile, _) = maybeCreateEmptyKeytabFiles()
-    JaasTestUtils.zkSections :+
-      JaasTestUtils.kafkaServerSection("secure_external.KafkaServer", kafkaServerSaslMechanisms(SecureExternal), Some(serverKeytabFile))
+    Seq(JaasTestUtils.kafkaServerSection("secure_external.KafkaServer", kafkaServerSaslMechanisms(SecureExternal).asJava, Some(serverKeytabFile).toJava))
   }
 
   override protected def dynamicJaasSections: Properties = {
     val props = new Properties
     kafkaServerSaslMechanisms(SecureInternal).foreach { mechanism =>
       addDynamicJaasSection(props, SecureInternal, mechanism,
-        JaasTestUtils.kafkaServerSection("secure_internal.KafkaServer", Seq(mechanism), None))
+        JaasTestUtils.kafkaServerSection("secure_internal.KafkaServer", java.util.List.of(mechanism), None.toJava))
     }
     props
   }

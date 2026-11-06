@@ -17,75 +17,253 @@
 package org.apache.kafka.streams.processor.internals.assignment;
 
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.streams.errors.TaskAssignmentException;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.state.HostInfo;
-import org.junit.Test;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import static org.junit.Assert.assertEquals;
+import static org.apache.kafka.common.utils.Utils.mkEntry;
+import static org.apache.kafka.common.utils.Utils.mkMap;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.NAMED_TASK_T0_0_0;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.NAMED_TASK_T0_0_1;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.NAMED_TASK_T0_1_0;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.NAMED_TASK_T1_0_0;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.NAMED_TASK_T1_0_1;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.NAMED_TASK_T2_0_0;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.NAMED_TASK_T2_2_0;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.TASK_0_0;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.TASK_0_1;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.TASK_1_0;
+import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.TASK_1_1;
+import static org.apache.kafka.streams.processor.internals.assignment.StreamsAssignmentProtocolVersions.LATEST_SUPPORTED_VERSION;
+import static org.apache.kafka.streams.processor.internals.assignment.StreamsAssignmentProtocolVersions.MIN_NAMED_TOPOLOGY_VERSION;
+import static org.apache.kafka.streams.processor.internals.assignment.StreamsAssignmentProtocolVersions.UNKNOWN;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class AssignmentInfoTest {
-    private final List<TaskId> activeTasks = Arrays.asList(
-        new TaskId(0, 0),
-        new TaskId(0, 0),
-        new TaskId(0, 1), new TaskId(1, 0));
-    private final Map<TaskId, Set<TopicPartition>> standbyTasks = new HashMap<TaskId, Set<TopicPartition>>() {
-        {
-            put(new TaskId(1, 1),
-                Utils.mkSet(new TopicPartition("t1", 1), new TopicPartition("t2", 1)));
-            put(new TaskId(2, 0),
-                Utils.mkSet(new TopicPartition("t3", 0), new TopicPartition("t3", 0)));
-        }
-    };
-    private final Map<HostInfo, Set<TopicPartition>> globalAssignment = new HashMap<HostInfo, Set<TopicPartition>>() {
-        {
-            put(new HostInfo("localhost", 80),
-                Utils.mkSet(new TopicPartition("t1", 1), new TopicPartition("t3", 3)));
-        }
-    };
+    private final List<TaskId> activeTasks = List.of(
+        TASK_0_0,
+        TASK_0_1,
+        TASK_1_0,
+        TASK_1_0
+    );
+
+    private final Map<TaskId, Set<TopicPartition>> standbyTasks = mkMap(
+        mkEntry(TASK_1_0, Set.of(new TopicPartition("t1", 0), new TopicPartition("t2", 0))),
+        mkEntry(TASK_1_1, Set.of(new TopicPartition("t1", 1), new TopicPartition("t2", 1)))
+    );
+
+    private static final List<TaskId> NAMED_ACTIVE_TASKS = List.of(
+        NAMED_TASK_T0_0_1,
+        NAMED_TASK_T0_1_0,
+        NAMED_TASK_T0_1_0,
+        NAMED_TASK_T1_0_1,
+        NAMED_TASK_T1_0_1,
+        NAMED_TASK_T2_0_0,
+        NAMED_TASK_T2_2_0
+    );
+
+    private static final Map<TaskId, Set<TopicPartition>> NAMED_STANDBY_TASKS = mkMap(
+        mkEntry(NAMED_TASK_T0_0_0, Set.of(new TopicPartition("t0-1", 0), new TopicPartition("t0-2", 0))),
+        mkEntry(NAMED_TASK_T0_0_1, Set.of(new TopicPartition("t0-1", 1), new TopicPartition("t0-2", 1))),
+        mkEntry(NAMED_TASK_T1_0_0, Set.of(new TopicPartition("t1-1", 0), new TopicPartition("t1-2", 0)))
+    );
+
+    private final Map<HostInfo, Set<TopicPartition>> activeAssignment = mkMap(
+        mkEntry(new HostInfo("localhost", 8088),
+            Set.of(new TopicPartition("t0", 0),
+                new TopicPartition("t1", 0),
+                new TopicPartition("t2", 0))),
+        mkEntry(new HostInfo("localhost", 8089),
+            Set.of(new TopicPartition("t0", 1),
+                new TopicPartition("t1", 1),
+                new TopicPartition("t2", 1)))
+    );
+
+    private final Map<HostInfo, Set<TopicPartition>> standbyAssignment = mkMap(
+        mkEntry(new HostInfo("localhost", 8088),
+            Set.of(new TopicPartition("t1", 0),
+                new TopicPartition("t2", 0))),
+        mkEntry(new HostInfo("localhost", 8089),
+            Set.of(new TopicPartition("t1", 1),
+                new TopicPartition("t2", 1)))
+    );
 
     @Test
     public void shouldUseLatestSupportedVersionByDefault() {
-        final AssignmentInfo info = new AssignmentInfo(activeTasks, standbyTasks, globalAssignment);
-        assertEquals(AssignmentInfo.LATEST_SUPPORTED_VERSION, info.version());
+        final AssignmentInfo info = new AssignmentInfo(LATEST_SUPPORTED_VERSION, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 0);
+        assertEquals(LATEST_SUPPORTED_VERSION, info.version());
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void shouldThrowForUnknownVersion1() {
-        new AssignmentInfo(0, activeTasks, standbyTasks, globalAssignment);
+        assertThrows(IllegalArgumentException.class, () -> new AssignmentInfo(0, activeTasks, standbyTasks,
+            activeAssignment, Map.of(), 0));
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void shouldThrowForUnknownVersion2() {
-        new AssignmentInfo(AssignmentInfo.LATEST_SUPPORTED_VERSION + 1, activeTasks, standbyTasks, globalAssignment);
+        assertThrows(IllegalArgumentException.class, () -> new AssignmentInfo(LATEST_SUPPORTED_VERSION + 1,
+            activeTasks, standbyTasks, activeAssignment, Map.of(), 0));
     }
 
     @Test
     public void shouldEncodeAndDecodeVersion1() {
-        final AssignmentInfo info = new AssignmentInfo(1, activeTasks, standbyTasks, globalAssignment);
-        final AssignmentInfo expectedInfo = new AssignmentInfo(1, AssignmentInfo.UNKNOWN, activeTasks, standbyTasks, Collections.<HostInfo, Set<TopicPartition>>emptyMap());
+        final AssignmentInfo info = new AssignmentInfo(1, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 0);
+        final AssignmentInfo expectedInfo = new AssignmentInfo(1, UNKNOWN, activeTasks, standbyTasks, Map.of(), Map.of(), 0);
         assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
     }
 
     @Test
     public void shouldEncodeAndDecodeVersion2() {
-        final AssignmentInfo info = new AssignmentInfo(2, activeTasks, standbyTasks, globalAssignment);
-        final AssignmentInfo expectedInfo = new AssignmentInfo(2, AssignmentInfo.UNKNOWN, activeTasks, standbyTasks, globalAssignment);
+        final AssignmentInfo info = new AssignmentInfo(2, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 0);
+        final AssignmentInfo expectedInfo = new AssignmentInfo(2, UNKNOWN, activeTasks, standbyTasks, activeAssignment, Map.of(), 0);
         assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
     }
 
     @Test
     public void shouldEncodeAndDecodeVersion3() {
-        final AssignmentInfo info = new AssignmentInfo(3, activeTasks, standbyTasks, globalAssignment);
-        final AssignmentInfo expectedInfo = new AssignmentInfo(3, AssignmentInfo.LATEST_SUPPORTED_VERSION, activeTasks, standbyTasks, globalAssignment);
+        final AssignmentInfo info = new AssignmentInfo(3, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 0);
+        final AssignmentInfo expectedInfo = new AssignmentInfo(3, LATEST_SUPPORTED_VERSION, activeTasks, standbyTasks,
+            activeAssignment, Map.of(), 0);
         assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
     }
 
+    @Test
+    public void shouldEncodeAndDecodeVersion4() {
+        final AssignmentInfo info = new AssignmentInfo(4, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        final AssignmentInfo expectedInfo = new AssignmentInfo(4, LATEST_SUPPORTED_VERSION, activeTasks, standbyTasks,
+            activeAssignment, Map.of(), 2);
+        assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
+    }
+
+    @Test
+    public void shouldEncodeAndDecodeVersion5() {
+        final AssignmentInfo info = new AssignmentInfo(5, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        final AssignmentInfo expectedInfo = new AssignmentInfo(5, LATEST_SUPPORTED_VERSION, activeTasks, standbyTasks,
+            activeAssignment, Map.of(), 2);
+        assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
+    }
+
+    @Test
+    public void shouldEncodeAndDecodeVersion6() {
+        final AssignmentInfo info = new AssignmentInfo(6, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        final AssignmentInfo expectedInfo = new AssignmentInfo(6, LATEST_SUPPORTED_VERSION, activeTasks, standbyTasks,
+            activeAssignment, standbyAssignment, 2);
+        assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
+    }
+
+    @Test
+    public void shouldEncodeAndDecodeVersion7() {
+        final AssignmentInfo info =
+            new AssignmentInfo(7, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        final AssignmentInfo expectedInfo =
+            new AssignmentInfo(7, LATEST_SUPPORTED_VERSION, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
+    }
+
+    @Test
+    public void shouldEncodeAndDecodeVersion8() {
+        final AssignmentInfo info =
+            new AssignmentInfo(8, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        final AssignmentInfo expectedInfo =
+            new AssignmentInfo(8, LATEST_SUPPORTED_VERSION, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
+    }
+
+    @Test
+    public void shouldEncodeAndDecodeVersion9() {
+        final AssignmentInfo info =
+            new AssignmentInfo(9, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        final AssignmentInfo expectedInfo =
+            new AssignmentInfo(9, LATEST_SUPPORTED_VERSION, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
+    }
+
+    @Test
+    public void shouldEncodeAndDecodeVersion10() {
+        final AssignmentInfo info =
+            new AssignmentInfo(10, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        final AssignmentInfo expectedInfo =
+            new AssignmentInfo(10, LATEST_SUPPORTED_VERSION, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 2);
+        assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
+    }
+
+    @Test
+    public void shouldEncodeAndDecodeVersion10WithNamedTopologies() {
+        final AssignmentInfo info =
+            new AssignmentInfo(10, LATEST_SUPPORTED_VERSION, NAMED_ACTIVE_TASKS, NAMED_STANDBY_TASKS, activeAssignment, standbyAssignment, 2);
+        assertEquals(info, AssignmentInfo.decode(info.encode()));
+    }
+
+    @Test
+    public void shouldNotEncodeAndDecodeNamedTopologiesWithOlderVersion() {
+        final AssignmentInfo info =
+            new AssignmentInfo(MIN_NAMED_TOPOLOGY_VERSION - 1, LATEST_SUPPORTED_VERSION, NAMED_ACTIVE_TASKS, NAMED_STANDBY_TASKS, activeAssignment, standbyAssignment, 2);
+        assertThrows(TaskAssignmentException.class, () -> AssignmentInfo.decode(info.encode()));
+    }
+
+    @Test
+    public void shouldEncodeAndDecodeSmallerCommonlySupportedVersion() {
+        final int usedVersion = 5;
+        final int commonlySupportedVersion = 5;
+        final AssignmentInfo info = new AssignmentInfo(usedVersion, commonlySupportedVersion, activeTasks, standbyTasks,
+            activeAssignment, standbyAssignment, 2);
+        final AssignmentInfo expectedInfo = new AssignmentInfo(usedVersion, commonlySupportedVersion, activeTasks, standbyTasks,
+            activeAssignment, Map.of(), 2);
+        assertEquals(expectedInfo, AssignmentInfo.decode(info.encode()));
+    }
+
+    @Test
+    public void nextRebalanceTimeShouldBeMaxValueByDefault() {
+        final AssignmentInfo info = new AssignmentInfo(7, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 0);
+        assertEquals(Long.MAX_VALUE, info.nextRebalanceMs());
+    }
+
+    @Test
+    public void shouldDecodeDefaultNextRebalanceTime() {
+        final AssignmentInfo info = new AssignmentInfo(7, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 0);
+        assertEquals(Long.MAX_VALUE, info.nextRebalanceMs());
+    }
+
+    @Test
+    public void shouldEncodeAndDecodeNextRebalanceTime() {
+        final AssignmentInfo info = new AssignmentInfo(7, activeTasks, standbyTasks, activeAssignment, standbyAssignment, 0);
+        info.setNextRebalanceTime(1000L);
+        assertEquals(1000L, AssignmentInfo.decode(info.encode()).nextRebalanceMs());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {5, 6, LATEST_SUPPORTED_VERSION})
+    public void shouldThrowOnTopicIndexNotInDictionary(final int version) {
+        final int partition = 123_456_789;
+        final AssignmentInfo info = new AssignmentInfo(version, List.of(), Map.of(),
+            Map.of(new HostInfo("localhost", 8088), Set.of(new TopicPartition("t0", partition))), Map.of(), 0);
+        final ByteBuffer encoded = info.encode();
+        final byte[] bytes = new byte[encoded.remaining()];
+        encoded.get(bytes);
+        final byte[] partitionBytes = ByteBuffer.allocate(Integer.BYTES).putInt(partition).array();
+        int partitionOffset = -1;
+        for (int i = 0; i + Integer.BYTES <= bytes.length; i++) {
+            if (ByteBuffer.wrap(bytes, i, Integer.BYTES).equals(ByteBuffer.wrap(partitionBytes))) {
+                partitionOffset = i;
+            }
+        }
+        ByteBuffer.wrap(bytes).putInt(partitionOffset - Integer.BYTES, 99);
+
+        final TaskAssignmentException exception = assertThrows(
+            TaskAssignmentException.class,
+            () -> AssignmentInfo.decode(ByteBuffer.wrap(bytes))
+        );
+        assertEquals("Corrupted user data byte[]. Topic index 99 is not in the topic dictionary.", exception.getMessage());
+    }
 }

@@ -16,52 +16,77 @@
  */
 package org.apache.kafka.connect.runtime.rest.resources;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-
 import org.apache.kafka.connect.errors.AlreadyExistsException;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.NotFoundException;
+import org.apache.kafka.connect.runtime.AbstractStatus;
 import org.apache.kafka.connect.runtime.ConnectorConfig;
 import org.apache.kafka.connect.runtime.Herder;
-import org.apache.kafka.connect.runtime.WorkerConfig;
+import org.apache.kafka.connect.runtime.RestartRequest;
+import org.apache.kafka.connect.runtime.TargetState;
 import org.apache.kafka.connect.runtime.distributed.NotAssignedException;
 import org.apache.kafka.connect.runtime.distributed.NotLeaderException;
+import org.apache.kafka.connect.runtime.distributed.RebalanceNeededException;
 import org.apache.kafka.connect.runtime.rest.RestClient;
+import org.apache.kafka.connect.runtime.rest.RestRequestTimeout;
+import org.apache.kafka.connect.runtime.rest.RestServerConfig;
+import org.apache.kafka.connect.runtime.rest.entities.ActiveTopicsInfo;
 import org.apache.kafka.connect.runtime.rest.entities.ConnectorInfo;
+import org.apache.kafka.connect.runtime.rest.entities.ConnectorOffset;
+import org.apache.kafka.connect.runtime.rest.entities.ConnectorOffsets;
+import org.apache.kafka.connect.runtime.rest.entities.ConnectorStateInfo;
 import org.apache.kafka.connect.runtime.rest.entities.ConnectorType;
 import org.apache.kafka.connect.runtime.rest.entities.CreateConnectorRequest;
+import org.apache.kafka.connect.runtime.rest.entities.Message;
 import org.apache.kafka.connect.runtime.rest.entities.TaskInfo;
+import org.apache.kafka.connect.runtime.rest.errors.ConnectRestException;
 import org.apache.kafka.connect.util.Callback;
 import org.apache.kafka.connect.util.ConnectorTaskId;
-import org.easymock.Capture;
-import org.easymock.EasyMock;
-import org.easymock.IAnswer;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.powermock.api.easymock.PowerMock;
-import org.powermock.api.easymock.annotation.Mock;
-import org.powermock.core.classloader.annotations.PowerMockIgnore;
-import org.powermock.core.classloader.annotations.PrepareForTest;
-import org.powermock.modules.junit4.PowerMockRunner;
 
-import javax.ws.rs.BadRequestException;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
+import org.mockito.stubbing.Stubber;
+
 import java.net.URI;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
-import static org.junit.Assert.assertEquals;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
-@RunWith(PowerMockRunner.class)
-@PrepareForTest(RestClient.class)
-@PowerMockIgnore("javax.management.*")
+import static org.apache.kafka.connect.runtime.rest.RestServer.DEFAULT_HEALTH_CHECK_TIMEOUT_MS;
+import static org.apache.kafka.connect.runtime.rest.RestServer.DEFAULT_REST_REQUEST_TIMEOUT_MS;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.isNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.STRICT_STUBS)
 @SuppressWarnings("unchecked")
 public class ConnectorsResourceTest {
     // Note trailing / and that we do *not* use LEADER_URL to construct our reference values. This checks that we handle
@@ -75,6 +100,7 @@ public class ConnectorsResourceTest {
     private static final String CONNECTOR_NAME_PADDING_WHITESPACES = "   " + CONNECTOR_NAME + "  \n  ";
     private static final Boolean FORWARD = true;
     private static final Map<String, String> CONNECTOR_CONFIG_SPECIAL_CHARS = new HashMap<>();
+    private static final HttpHeaders NULL_HEADERS = null;
     static {
         CONNECTOR_CONFIG_SPECIAL_CHARS.put("name", CONNECTOR_NAME_SPECIAL_CHARS);
         CONNECTOR_CONFIG_SPECIAL_CHARS.put("sample_config", "test_config");
@@ -84,6 +110,17 @@ public class ConnectorsResourceTest {
     static {
         CONNECTOR_CONFIG.put("name", CONNECTOR_NAME);
         CONNECTOR_CONFIG.put("sample_config", "test_config");
+    }
+
+    private static final Map<String, String> CONNECTOR_CONFIG_PATCH = new HashMap<>();
+    static {
+        CONNECTOR_CONFIG_PATCH.put("sample_config", "test_config_new");
+        CONNECTOR_CONFIG_PATCH.put("sample_config_2", "test_config_2");
+    }
+
+    private static final Map<String, String> CONNECTOR_CONFIG_PATCHED = new HashMap<>(CONNECTOR_CONFIG);
+    static {
+        CONNECTOR_CONFIG_PATCHED.putAll(CONNECTOR_CONFIG_PATCH);
     }
 
     private static final Map<String, String> CONNECTOR_CONFIG_CONTROL_SEQUENCES = new HashMap<>();
@@ -103,14 +140,14 @@ public class ConnectorsResourceTest {
         CONNECTOR_CONFIG_WITH_EMPTY_NAME.put(ConnectorConfig.NAME_CONFIG, "");
         CONNECTOR_CONFIG_WITH_EMPTY_NAME.put("sample_config", "test_config");
     }
-    private static final List<ConnectorTaskId> CONNECTOR_TASK_NAMES = Arrays.asList(
+    private static final List<ConnectorTaskId> CONNECTOR_TASK_NAMES = List.of(
             new ConnectorTaskId(CONNECTOR_NAME, 0),
             new ConnectorTaskId(CONNECTOR_NAME, 1)
     );
     private static final List<Map<String, String>> TASK_CONFIGS = new ArrayList<>();
     static {
-        TASK_CONFIGS.add(Collections.singletonMap("config", "value"));
-        TASK_CONFIGS.add(Collections.singletonMap("config", "other_value"));
+        TASK_CONFIGS.add(Map.of("config", "value"));
+        TASK_CONFIGS.add(Map.of("config", "other_value"));
     }
     private static final List<TaskInfo> TASK_INFOS = new ArrayList<>();
     static {
@@ -118,118 +155,242 @@ public class ConnectorsResourceTest {
         TASK_INFOS.add(new TaskInfo(new ConnectorTaskId(CONNECTOR_NAME, 1), TASK_CONFIGS.get(1)));
     }
 
+    private static final Set<String> CONNECTOR_ACTIVE_TOPICS = new HashSet<>(
+            List.of("foo_topic", "bar_topic"));
+
+    private static final RestRequestTimeout REQUEST_TIMEOUT = RestRequestTimeout.constant(
+        DEFAULT_REST_REQUEST_TIMEOUT_MS,
+        DEFAULT_HEALTH_CHECK_TIMEOUT_MS
+    );
+
     @Mock
     private Herder herder;
     private ConnectorsResource connectorsResource;
+    private UriInfo forward;
+    @Mock
+    private RestClient restClient;
+    @Mock
+    private RestServerConfig serverConfig;
 
-    @Before
+    @BeforeEach
     public void setUp() throws NoSuchMethodException {
-        PowerMock.mockStatic(RestClient.class,
-                RestClient.class.getMethod("httpRequest", String.class, String.class, Object.class, TypeReference.class, WorkerConfig.class));
-        connectorsResource = new ConnectorsResource(herder, null);
+        when(serverConfig.topicTrackingEnabled()).thenReturn(true);
+        when(serverConfig.topicTrackingResetEnabled()).thenReturn(true);
+        connectorsResource = new ConnectorsResource(herder, serverConfig, restClient, REQUEST_TIMEOUT);
+        forward = mock(UriInfo.class);
     }
 
-    private static final Map<String, String> getConnectorConfig(Map<String, String> mapToClone) {
-        Map<String, String> result = new HashMap<>(mapToClone);
-        return result;
+    @AfterEach
+    public void teardown() {
+        verifyNoMoreInteractions(herder);
     }
 
-    @Test
-    public void testListConnectors() throws Throwable {
-        final Capture<Callback<Collection<String>>> cb = Capture.newInstance();
-        herder.connectors(EasyMock.capture(cb));
-        expectAndCallbackResult(cb, Arrays.asList(CONNECTOR2_NAME, CONNECTOR_NAME));
-
-        PowerMock.replayAll();
-
-        Collection<String> connectors = connectorsResource.listConnectors(FORWARD);
-        // Ordering isn't guaranteed, compare sets
-        assertEquals(new HashSet<>(Arrays.asList(CONNECTOR_NAME, CONNECTOR2_NAME)), new HashSet<>(connectors));
-
-        PowerMock.verifyAll();
+    private static Map<String, String> getConnectorConfig(Map<String, String> mapToClone) {
+        return new HashMap<>(mapToClone);
     }
 
     @Test
-    public void testListConnectorsNotLeader() throws Throwable {
-        final Capture<Callback<Collection<String>>> cb = Capture.newInstance();
-        herder.connectors(EasyMock.capture(cb));
-        expectAndCallbackNotLeaderException(cb);
-        // Should forward request
-        EasyMock.expect(RestClient.httpRequest(EasyMock.eq("http://leader:8083/connectors?forward=false"), EasyMock.eq("GET"),
-                EasyMock.isNull(), EasyMock.anyObject(TypeReference.class), EasyMock.anyObject(WorkerConfig.class)))
-                .andReturn(new RestClient.HttpResponse<>(200, new HashMap<String, String>(), Arrays.asList(CONNECTOR2_NAME, CONNECTOR_NAME)));
+    public void testListConnectors() {
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.putSingle("forward", "true");
+        when(forward.getQueryParameters()).thenReturn(queryParams);
+        when(herder.connectors()).thenReturn(List.of(CONNECTOR2_NAME, CONNECTOR_NAME));
 
-        PowerMock.replayAll();
-
-        Collection<String> connectors = connectorsResource.listConnectors(FORWARD);
+        Collection<String> connectors = (Collection<String>) connectorsResource.listConnectors(forward, NULL_HEADERS).getEntity();
         // Ordering isn't guaranteed, compare sets
-        assertEquals(new HashSet<>(Arrays.asList(CONNECTOR_NAME, CONNECTOR2_NAME)), new HashSet<>(connectors));
-
-        PowerMock.verifyAll();
+        assertEquals(Set.of(CONNECTOR_NAME, CONNECTOR2_NAME), new HashSet<>(connectors));
     }
 
-    @Test(expected = ConnectException.class)
-    public void testListConnectorsNotSynced() throws Throwable {
-        final Capture<Callback<Collection<String>>> cb = Capture.newInstance();
-        herder.connectors(EasyMock.capture(cb));
-        expectAndCallbackException(cb, new ConnectException("not synced"));
+    @Test
+    public void testExpandConnectorsStatus() {
+        when(herder.connectors()).thenReturn(List.of(CONNECTOR2_NAME, CONNECTOR_NAME));
+        ConnectorStateInfo connector = mock(ConnectorStateInfo.class);
+        ConnectorStateInfo connector2 = mock(ConnectorStateInfo.class);
+        when(herder.connectorStatus(CONNECTOR2_NAME)).thenReturn(connector2);
+        when(herder.connectorStatus(CONNECTOR_NAME)).thenReturn(connector);
 
-        PowerMock.replayAll();
+        forward = mock(UriInfo.class);
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.putSingle("expand", "status");
+        when(forward.getQueryParameters()).thenReturn(queryParams);
 
-        // throws
-        connectorsResource.listConnectors(FORWARD);
+        Map<String, Map<String, Object>> expanded = (Map<String, Map<String, Object>>) connectorsResource.listConnectors(forward, NULL_HEADERS).getEntity();
+        // Ordering isn't guaranteed, compare sets
+        assertEquals(Set.of(CONNECTOR_NAME, CONNECTOR2_NAME), expanded.keySet());
+        assertEquals(connector2, expanded.get(CONNECTOR2_NAME).get("status"));
+        assertEquals(connector, expanded.get(CONNECTOR_NAME).get("status"));
     }
+
+    @Test
+    public void testExpandConnectorsInfo() {
+        when(herder.connectors()).thenReturn(List.of(CONNECTOR2_NAME, CONNECTOR_NAME));
+        ConnectorInfo connector = mock(ConnectorInfo.class);
+        ConnectorInfo connector2 = mock(ConnectorInfo.class);
+        when(herder.connectorInfo(CONNECTOR2_NAME)).thenReturn(connector2);
+        when(herder.connectorInfo(CONNECTOR_NAME)).thenReturn(connector);
+
+        forward = mock(UriInfo.class);
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.putSingle("expand", "info");
+        when(forward.getQueryParameters()).thenReturn(queryParams);
+
+        Map<String, Map<String, Object>> expanded = (Map<String, Map<String, Object>>) connectorsResource.listConnectors(forward, NULL_HEADERS).getEntity();
+        // Ordering isn't guaranteed, compare sets
+        assertEquals(Set.of(CONNECTOR_NAME, CONNECTOR2_NAME), expanded.keySet());
+        assertEquals(connector2, expanded.get(CONNECTOR2_NAME).get("info"));
+        assertEquals(connector, expanded.get(CONNECTOR_NAME).get("info"));
+    }
+
+    @Test
+    public void testFullExpandConnectors() {
+        when(herder.connectors()).thenReturn(List.of(CONNECTOR2_NAME, CONNECTOR_NAME));
+        ConnectorInfo connectorInfo = mock(ConnectorInfo.class);
+        ConnectorInfo connectorInfo2 = mock(ConnectorInfo.class);
+        when(herder.connectorInfo(CONNECTOR2_NAME)).thenReturn(connectorInfo2);
+        when(herder.connectorInfo(CONNECTOR_NAME)).thenReturn(connectorInfo);
+        ConnectorStateInfo connector = mock(ConnectorStateInfo.class);
+        ConnectorStateInfo connector2 = mock(ConnectorStateInfo.class);
+        when(herder.connectorStatus(CONNECTOR2_NAME)).thenReturn(connector2);
+        when(herder.connectorStatus(CONNECTOR_NAME)).thenReturn(connector);
+
+        forward = mock(UriInfo.class);
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.put("expand", List.of("info", "status"));
+        when(forward.getQueryParameters()).thenReturn(queryParams);
+
+        Map<String, Map<String, Object>> expanded = (Map<String, Map<String, Object>>) connectorsResource.listConnectors(forward, NULL_HEADERS).getEntity();
+        // Ordering isn't guaranteed, compare sets
+        assertEquals(Set.of(CONNECTOR_NAME, CONNECTOR2_NAME), expanded.keySet());
+        assertEquals(connectorInfo2, expanded.get(CONNECTOR2_NAME).get("info"));
+        assertEquals(connectorInfo, expanded.get(CONNECTOR_NAME).get("info"));
+        assertEquals(connector2, expanded.get(CONNECTOR2_NAME).get("status"));
+        assertEquals(connector, expanded.get(CONNECTOR_NAME).get("status"));
+    }
+
+    @Test
+    public void testExpandConnectorsWithConnectorNotFound() {
+        when(herder.connectors()).thenReturn(List.of(CONNECTOR2_NAME, CONNECTOR_NAME));
+        ConnectorStateInfo connector2 = mock(ConnectorStateInfo.class);
+        when(herder.connectorStatus(CONNECTOR2_NAME)).thenReturn(connector2);
+        doThrow(mock(NotFoundException.class)).when(herder).connectorStatus(CONNECTOR_NAME);
+
+        forward = mock(UriInfo.class);
+        MultivaluedMap<String, String> queryParams = new MultivaluedHashMap<>();
+        queryParams.putSingle("expand", "status");
+        when(forward.getQueryParameters()).thenReturn(queryParams);
+
+        Map<String, Map<String, Object>> expanded = (Map<String, Map<String, Object>>) connectorsResource.listConnectors(forward, NULL_HEADERS).getEntity();
+        // Ordering isn't guaranteed, compare sets
+        assertEquals(Set.of(CONNECTOR2_NAME), expanded.keySet());
+        assertEquals(connector2, expanded.get(CONNECTOR2_NAME).get("status"));
+    }
+
 
     @Test
     public void testCreateConnector() throws Throwable {
-        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME, Collections.singletonMap(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME));
+        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME,
+            Map.of(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME), null, null);
 
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.putConnectorConfig(EasyMock.eq(CONNECTOR_NAME), EasyMock.eq(body.config()), EasyMock.eq(false), EasyMock.capture(cb));
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
         expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG,
-            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE)));
+            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE))
+        ).when(herder).putConnectorConfig(eq(CONNECTOR_NAME), eq(body.config()), isNull(), isNull(), eq(false), cb.capture());
 
-        PowerMock.replayAll();
+        connectorsResource.createConnector(FORWARD, NULL_HEADERS, body);
+    }
 
-        connectorsResource.createConnector(FORWARD, body);
+    @Test
+    public void testCreateConnectorWithPausedInitialState() throws Throwable {
+        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME,
+            Map.of(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME), CreateConnectorRequest.InitialState.PAUSED, null);
 
-        PowerMock.verifyAll();
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG,
+            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE))
+        ).when(herder).putConnectorConfig(eq(CONNECTOR_NAME), eq(body.config()), eq(TargetState.PAUSED), isNull(), eq(false), cb.capture());
+
+        connectorsResource.createConnector(FORWARD, NULL_HEADERS, body);
+    }
+
+    @Test
+    public void testCreateConnectorWithStoppedInitialState() throws Throwable {
+        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME,
+            Map.of(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME), CreateConnectorRequest.InitialState.STOPPED, null);
+
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG,
+            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE))
+        ).when(herder).putConnectorConfig(eq(CONNECTOR_NAME), eq(body.config()), eq(TargetState.STOPPED), isNull(), eq(false), cb.capture());
+
+        connectorsResource.createConnector(FORWARD, NULL_HEADERS, body);
+    }
+
+    @Test
+    public void testCreateConnectorWithRunningInitialState() throws Throwable {
+        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME,
+            Map.of(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME), CreateConnectorRequest.InitialState.RUNNING, null);
+
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG,
+            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE))
+        ).when(herder).putConnectorConfig(eq(CONNECTOR_NAME), eq(body.config()), eq(TargetState.STARTED), isNull(), eq(false), cb.capture());
+
+        connectorsResource.createConnector(FORWARD, NULL_HEADERS, body);
+    }
+
+    @Test
+    public void testCreateConnectorWithInitialOffsets() throws Throwable {
+        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME,
+            Map.of(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME), null,
+            List.of(new ConnectorOffset(Map.of("partitionKey", "partitionValue"), Map.of("offsetKey", "offsetValue"))));
+        String offsetsStatus = "The offsets for this connector have been set successfully";
+
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG,
+            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE).withOffsetsStatus(offsetsStatus))
+        ).when(herder).putConnectorConfig(eq(CONNECTOR_NAME), eq(body.config()), isNull(), eq(body.initialOffsetsMap()), eq(false), cb.capture());
+
+        Response response = connectorsResource.createConnector(FORWARD, NULL_HEADERS, body);
+        assertEquals(offsetsStatus, ((ConnectorInfo) response.getEntity()).offsetsStatus());
     }
 
     @Test
     public void testCreateConnectorNotLeader() throws Throwable {
-        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME, Collections.singletonMap(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME));
+        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME,
+            Map.of(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME), null, null);
 
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.putConnectorConfig(EasyMock.eq(CONNECTOR_NAME), EasyMock.eq(body.config()), EasyMock.eq(false), EasyMock.capture(cb));
-        expectAndCallbackNotLeaderException(cb);
-        // Should forward request
-        EasyMock.expect(RestClient.httpRequest(EasyMock.eq("http://leader:8083/connectors?forward=false"), EasyMock.eq("POST"), EasyMock.eq(body), EasyMock.<TypeReference>anyObject(), EasyMock.anyObject(WorkerConfig.class)))
-                .andReturn(new RestClient.HttpResponse<>(201, new HashMap<String, String>(), new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG, CONNECTOR_TASK_NAMES,
-                    ConnectorType.SOURCE)));
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackNotLeaderException(cb).when(herder)
+            .putConnectorConfig(eq(CONNECTOR_NAME), eq(body.config()), isNull(), isNull(), eq(false), cb.capture());
 
-        PowerMock.replayAll();
-
-        connectorsResource.createConnector(FORWARD, body);
-
-        PowerMock.verifyAll();
-
-
+        when(restClient.httpRequest(eq(LEADER_URL + "connectors?forward=false"), eq("POST"), isNull(), eq(body), any()))
+                .thenReturn(new RestClient.HttpResponse<>(201, new HashMap<>(), new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG, CONNECTOR_TASK_NAMES, ConnectorType.SOURCE)));
+        connectorsResource.createConnector(FORWARD, NULL_HEADERS, body);
     }
 
-    @Test(expected = AlreadyExistsException.class)
-    public void testCreateConnectorExists() throws Throwable {
-        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME, Collections.singletonMap(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME));
+    @Test
+    public void testCreateConnectorWithHeaders() throws Throwable {
+        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME,
+            Map.of(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME), null, null);
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        HttpHeaders httpHeaders = mock(HttpHeaders.class);
+        expectAndCallbackNotLeaderException(cb)
+            .when(herder).putConnectorConfig(eq(CONNECTOR_NAME), eq(body.config()), isNull(), isNull(), eq(false), cb.capture());
 
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.putConnectorConfig(EasyMock.eq(CONNECTOR_NAME), EasyMock.eq(body.config()), EasyMock.eq(false), EasyMock.capture(cb));
-        expectAndCallbackException(cb, new AlreadyExistsException("already exists"));
+        when(restClient.httpRequest(eq(LEADER_URL + "connectors?forward=false"), eq("POST"), eq(httpHeaders), any(), any()))
+                .thenReturn(new RestClient.HttpResponse<>(202, new HashMap<>(), null));
+        connectorsResource.createConnector(FORWARD, httpHeaders, body);
+    }
 
-        PowerMock.replayAll();
+    @Test
+    public void testCreateConnectorExists() {
+        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME,
+            Map.of(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME), null, null);
 
-        connectorsResource.createConnector(FORWARD, body);
-
-        PowerMock.verifyAll();
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new AlreadyExistsException("already exists"))
+            .when(herder).putConnectorConfig(eq(CONNECTOR_NAME), eq(body.config()), isNull(), isNull(), eq(false), cb.capture());
+        assertThrows(AlreadyExistsException.class, () -> connectorsResource.createConnector(FORWARD, NULL_HEADERS, body));
     }
 
     @Test
@@ -237,18 +398,15 @@ public class ConnectorsResourceTest {
         // Clone CONNECTOR_CONFIG_WITHOUT_NAME Map, as createConnector changes it (puts the name in it) and this
         // will affect later tests
         Map<String, String> inputConfig = getConnectorConfig(CONNECTOR_CONFIG_WITHOUT_NAME);
-        final CreateConnectorRequest bodyIn = new CreateConnectorRequest(CONNECTOR_NAME_PADDING_WHITESPACES, inputConfig);
-        final CreateConnectorRequest bodyOut = new CreateConnectorRequest(CONNECTOR_NAME, CONNECTOR_CONFIG);
+        final CreateConnectorRequest bodyIn = new CreateConnectorRequest(CONNECTOR_NAME_PADDING_WHITESPACES, inputConfig, null, null);
+        final CreateConnectorRequest bodyOut = new CreateConnectorRequest(CONNECTOR_NAME, CONNECTOR_CONFIG, null, null);
 
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.putConnectorConfig(EasyMock.eq(bodyOut.name()), EasyMock.eq(bodyOut.config()), EasyMock.eq(false), EasyMock.capture(cb));
-        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(bodyOut.name(), bodyOut.config(), CONNECTOR_TASK_NAMES, ConnectorType.SOURCE)));
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(bodyOut.name(), bodyOut.config(),
+            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE))
+        ).when(herder).putConnectorConfig(eq(bodyOut.name()), eq(bodyOut.config()), isNull(), isNull(), eq(false), cb.capture());
 
-        PowerMock.replayAll();
-
-        connectorsResource.createConnector(FORWARD, bodyIn);
-
-        PowerMock.verifyAll();
+        connectorsResource.createConnector(FORWARD, NULL_HEADERS, bodyIn);
     }
 
     @Test
@@ -256,18 +414,15 @@ public class ConnectorsResourceTest {
         // Clone CONNECTOR_CONFIG_WITHOUT_NAME Map, as createConnector changes it (puts the name in it) and this
         // will affect later tests
         Map<String, String> inputConfig = getConnectorConfig(CONNECTOR_CONFIG_WITHOUT_NAME);
-        final CreateConnectorRequest bodyIn = new CreateConnectorRequest(CONNECTOR_NAME_ALL_WHITESPACES, inputConfig);
-        final CreateConnectorRequest bodyOut = new CreateConnectorRequest("", CONNECTOR_CONFIG_WITH_EMPTY_NAME);
+        final CreateConnectorRequest bodyIn = new CreateConnectorRequest(CONNECTOR_NAME_ALL_WHITESPACES, inputConfig, null, null);
+        final CreateConnectorRequest bodyOut = new CreateConnectorRequest("", CONNECTOR_CONFIG_WITH_EMPTY_NAME, null, null);
 
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.putConnectorConfig(EasyMock.eq(bodyOut.name()), EasyMock.eq(bodyOut.config()), EasyMock.eq(false), EasyMock.capture(cb));
-        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(bodyOut.name(), bodyOut.config(), CONNECTOR_TASK_NAMES, ConnectorType.SOURCE)));
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(bodyOut.name(), bodyOut.config(),
+            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE))
+        ).when(herder).putConnectorConfig(eq(bodyOut.name()), eq(bodyOut.config()), isNull(), isNull(), eq(false), cb.capture());
 
-        PowerMock.replayAll();
-
-        connectorsResource.createConnector(FORWARD, bodyIn);
-
-        PowerMock.verifyAll();
+        connectorsResource.createConnector(FORWARD, NULL_HEADERS, bodyIn);
     }
 
     @Test
@@ -275,380 +430,554 @@ public class ConnectorsResourceTest {
         // Clone CONNECTOR_CONFIG_WITHOUT_NAME Map, as createConnector changes it (puts the name in it) and this
         // will affect later tests
         Map<String, String> inputConfig = getConnectorConfig(CONNECTOR_CONFIG_WITHOUT_NAME);
-        final CreateConnectorRequest bodyIn = new CreateConnectorRequest(null, inputConfig);
-        final CreateConnectorRequest bodyOut = new CreateConnectorRequest("", CONNECTOR_CONFIG_WITH_EMPTY_NAME);
+        final CreateConnectorRequest bodyIn = new CreateConnectorRequest(null, inputConfig, null, null);
+        final CreateConnectorRequest bodyOut = new CreateConnectorRequest("", CONNECTOR_CONFIG_WITH_EMPTY_NAME, null, null);
 
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.putConnectorConfig(EasyMock.eq(bodyOut.name()), EasyMock.eq(bodyOut.config()), EasyMock.eq(false), EasyMock.capture(cb));
-        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(bodyOut.name(), bodyOut.config(), CONNECTOR_TASK_NAMES, ConnectorType.SOURCE)));
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(bodyOut.name(), bodyOut.config(),
+            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE))
+        ).when(herder).putConnectorConfig(eq(bodyOut.name()), eq(bodyOut.config()), isNull(), isNull(), eq(false), cb.capture());
 
-        PowerMock.replayAll();
-
-        connectorsResource.createConnector(FORWARD, bodyIn);
-
-        PowerMock.verifyAll();
+        connectorsResource.createConnector(FORWARD, NULL_HEADERS, bodyIn);
     }
 
     @Test
     public void testDeleteConnector() throws Throwable {
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.deleteConnectorConfig(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
-        expectAndCallbackResult(cb, null);
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, null).when(herder).deleteConnectorConfig(eq(CONNECTOR_NAME), cb.capture());
 
-        PowerMock.replayAll();
-
-        connectorsResource.destroyConnector(CONNECTOR_NAME, FORWARD);
-
-        PowerMock.verifyAll();
+        connectorsResource.destroyConnector(CONNECTOR_NAME, NULL_HEADERS, FORWARD);
     }
 
     @Test
     public void testDeleteConnectorNotLeader() throws Throwable {
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.deleteConnectorConfig(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
-        expectAndCallbackNotLeaderException(cb);
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackNotLeaderException(cb).when(herder)
+            .deleteConnectorConfig(eq(CONNECTOR_NAME), cb.capture());
         // Should forward request
-        EasyMock.expect(RestClient.httpRequest("http://leader:8083/connectors/" + CONNECTOR_NAME + "?forward=false", "DELETE", null, null, null))
-                .andReturn(new RestClient.HttpResponse<>(204, new HashMap<String, String>(), null));
-
-        PowerMock.replayAll();
-
-        connectorsResource.destroyConnector(CONNECTOR_NAME, FORWARD);
-
-        PowerMock.verifyAll();
+        when(restClient.httpRequest(eq(LEADER_URL + "connectors/" + CONNECTOR_NAME + "?forward=false"), eq("DELETE"), isNull(), any(), any()))
+                .thenReturn(new RestClient.HttpResponse<>(204, new HashMap<>(), null));
+        connectorsResource.destroyConnector(CONNECTOR_NAME, NULL_HEADERS, FORWARD);
     }
 
     // Not found exceptions should pass through to caller so they can be processed for 404s
-    @Test(expected = NotFoundException.class)
-    public void testDeleteConnectorNotFound() throws Throwable {
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.deleteConnectorConfig(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
-        expectAndCallbackException(cb, new NotFoundException("not found"));
+    @Test
+    public void testDeleteConnectorNotFound() {
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotFoundException("not found"))
+            .when(herder).deleteConnectorConfig(eq(CONNECTOR_NAME), cb.capture());
 
-        PowerMock.replayAll();
-
-        connectorsResource.destroyConnector(CONNECTOR_NAME, FORWARD);
-
-        PowerMock.verifyAll();
+        assertThrows(NotFoundException.class, () -> connectorsResource.destroyConnector(CONNECTOR_NAME, NULL_HEADERS, FORWARD));
     }
 
     @Test
     public void testGetConnector() throws Throwable {
-        final Capture<Callback<ConnectorInfo>> cb = Capture.newInstance();
-        herder.connectorInfo(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
-        expectAndCallbackResult(cb, new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG, CONNECTOR_TASK_NAMES,
-            ConnectorType.SOURCE));
+        final ArgumentCaptor<Callback<ConnectorInfo>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG, CONNECTOR_TASK_NAMES, ConnectorType.SOURCE))
+            .when(herder).connectorInfo(eq(CONNECTOR_NAME), cb.capture());
 
-        PowerMock.replayAll();
-
-        ConnectorInfo connInfo = connectorsResource.getConnector(CONNECTOR_NAME, FORWARD);
+        ConnectorInfo connInfo = connectorsResource.getConnector(CONNECTOR_NAME);
         assertEquals(new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG, CONNECTOR_TASK_NAMES, ConnectorType.SOURCE),
             connInfo);
-
-        PowerMock.verifyAll();
     }
 
     @Test
     public void testGetConnectorConfig() throws Throwable {
-        final Capture<Callback<Map<String, String>>> cb = Capture.newInstance();
-        herder.connectorConfig(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
-        expectAndCallbackResult(cb, CONNECTOR_CONFIG);
+        final ArgumentCaptor<Callback<Map<String, String>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, CONNECTOR_CONFIG).when(herder).connectorConfig(eq(CONNECTOR_NAME), cb.capture());
 
-        PowerMock.replayAll();
-
-        Map<String, String> connConfig = connectorsResource.getConnectorConfig(CONNECTOR_NAME, FORWARD);
+        Map<String, String> connConfig = connectorsResource.getConnectorConfig(CONNECTOR_NAME);
         assertEquals(CONNECTOR_CONFIG, connConfig);
-
-        PowerMock.verifyAll();
     }
 
-    @Test(expected = NotFoundException.class)
-    public void testGetConnectorConfigConnectorNotFound() throws Throwable {
-        final Capture<Callback<Map<String, String>>> cb = Capture.newInstance();
-        herder.connectorConfig(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
-        expectAndCallbackException(cb, new NotFoundException("not found"));
+    @Test
+    public void testGetConnectorConfigConnectorNotFound() {
+        final ArgumentCaptor<Callback<Map<String, String>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotFoundException("not found"))
+            .when(herder).connectorConfig(eq(CONNECTOR_NAME), cb.capture());
 
-        PowerMock.replayAll();
+        assertThrows(NotFoundException.class, () -> connectorsResource.getConnectorConfig(CONNECTOR_NAME));
+    }
 
-        connectorsResource.getConnectorConfig(CONNECTOR_NAME, FORWARD);
+    @Test
+    public void testGetTaskConfigs() throws Throwable {
+        final ConnectorTaskId connectorTask0 = new ConnectorTaskId(CONNECTOR_NAME, 0);
+        final Map<String, String> connectorTask0Configs = new HashMap<>();
+        connectorTask0Configs.put("connector-task0-config0", "123");
+        connectorTask0Configs.put("connector-task0-config1", "456");
+        final ConnectorTaskId connectorTask1 = new ConnectorTaskId(CONNECTOR_NAME, 1);
+        final Map<String, String> connectorTask1Configs = new HashMap<>();
+        connectorTask0Configs.put("connector-task1-config0", "321");
+        connectorTask0Configs.put("connector-task1-config1", "654");
+        final ConnectorTaskId connector2Task0 = new ConnectorTaskId(CONNECTOR2_NAME, 0);
+        final Map<String, String> connector2Task0Configs = Map.of("connector2-task0-config0", "789");
 
-        PowerMock.verifyAll();
+        final List<TaskInfo> expectedTasksConnector = new ArrayList<>();
+        expectedTasksConnector.add(new TaskInfo(connectorTask0, connectorTask0Configs));
+        expectedTasksConnector.add(new TaskInfo(connectorTask1, connectorTask1Configs));
+
+        final List<TaskInfo> expectedTasksConnector2 = new ArrayList<>();
+        expectedTasksConnector2.add(new TaskInfo(connector2Task0, connector2Task0Configs));
+
+        final ArgumentCaptor<Callback<List<TaskInfo>>> cb1 = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb1, expectedTasksConnector).when(herder).taskConfigs(eq(CONNECTOR_NAME), cb1.capture());
+        final ArgumentCaptor<Callback<List<TaskInfo>>> cb2 = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb2, expectedTasksConnector2).when(herder).taskConfigs(eq(CONNECTOR2_NAME), cb2.capture());
+
+        List<TaskInfo> taskConfigs = connectorsResource.getTaskConfigs(CONNECTOR_NAME);
+        assertEquals(expectedTasksConnector, taskConfigs);
+        List<TaskInfo> taskConfigs2 = connectorsResource.getTaskConfigs(CONNECTOR2_NAME);
+        assertEquals(expectedTasksConnector2, taskConfigs2);
     }
 
     @Test
     public void testPutConnectorConfig() throws Throwable {
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.putConnectorConfig(EasyMock.eq(CONNECTOR_NAME), EasyMock.eq(CONNECTOR_CONFIG), EasyMock.eq(true), EasyMock.capture(cb));
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
         expectAndCallbackResult(cb, new Herder.Created<>(false, new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG, CONNECTOR_TASK_NAMES,
-            ConnectorType.SINK)));
+            ConnectorType.SINK))
+        ).when(herder).putConnectorConfig(eq(CONNECTOR_NAME), eq(CONNECTOR_CONFIG), eq(true), cb.capture());
 
-        PowerMock.replayAll();
-
-        connectorsResource.putConnectorConfig(CONNECTOR_NAME, FORWARD, CONNECTOR_CONFIG);
-
-        PowerMock.verifyAll();
+        connectorsResource.putConnectorConfig(CONNECTOR_NAME, NULL_HEADERS, FORWARD, CONNECTOR_CONFIG);
     }
 
     @Test
     public void testCreateConnectorWithSpecialCharsInName() throws Throwable {
-        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME_SPECIAL_CHARS, Collections.singletonMap(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME_SPECIAL_CHARS));
+        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME_SPECIAL_CHARS,
+            Map.of(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME_SPECIAL_CHARS), null, null);
 
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.putConnectorConfig(EasyMock.eq(CONNECTOR_NAME_SPECIAL_CHARS), EasyMock.eq(body.config()), EasyMock.eq(false), EasyMock.capture(cb));
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
         expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(CONNECTOR_NAME_SPECIAL_CHARS, CONNECTOR_CONFIG,
-                CONNECTOR_TASK_NAMES, ConnectorType.SOURCE)));
+            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE))
+        ).when(herder).putConnectorConfig(eq(CONNECTOR_NAME_SPECIAL_CHARS), eq(body.config()), isNull(), isNull(), eq(false), cb.capture());
 
-        PowerMock.replayAll();
-
-        String rspLocation = connectorsResource.createConnector(FORWARD, body).getLocation().toString();
+        String rspLocation = connectorsResource.createConnector(FORWARD, NULL_HEADERS, body).getLocation().toString();
         String decoded = new URI(rspLocation).getPath();
-        Assert.assertEquals("/connectors/" + CONNECTOR_NAME_SPECIAL_CHARS, decoded);
-
-        PowerMock.verifyAll();
+        assertEquals("/connectors/" + CONNECTOR_NAME_SPECIAL_CHARS, decoded);
     }
 
     @Test
     public void testCreateConnectorWithControlSequenceInName() throws Throwable {
-        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME_CONTROL_SEQUENCES1, Collections.singletonMap(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME_CONTROL_SEQUENCES1));
+        CreateConnectorRequest body = new CreateConnectorRequest(CONNECTOR_NAME_CONTROL_SEQUENCES1,
+            Map.of(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME_CONTROL_SEQUENCES1), null, null);
 
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
-        herder.putConnectorConfig(EasyMock.eq(CONNECTOR_NAME_CONTROL_SEQUENCES1), EasyMock.eq(body.config()), EasyMock.eq(false), EasyMock.capture(cb));
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
         expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(CONNECTOR_NAME_CONTROL_SEQUENCES1, CONNECTOR_CONFIG,
-                CONNECTOR_TASK_NAMES, ConnectorType.SOURCE)));
+            CONNECTOR_TASK_NAMES, ConnectorType.SOURCE))
+        ).when(herder).putConnectorConfig(eq(CONNECTOR_NAME_CONTROL_SEQUENCES1), eq(body.config()), isNull(), isNull(), eq(false), cb.capture());
 
-        PowerMock.replayAll();
-
-        String rspLocation = connectorsResource.createConnector(FORWARD, body).getLocation().toString();
+        String rspLocation = connectorsResource.createConnector(FORWARD, NULL_HEADERS, body).getLocation().toString();
         String decoded = new URI(rspLocation).getPath();
-        Assert.assertEquals("/connectors/" + CONNECTOR_NAME_CONTROL_SEQUENCES1, decoded);
-
-        PowerMock.verifyAll();
+        assertEquals("/connectors/" + CONNECTOR_NAME_CONTROL_SEQUENCES1, decoded);
     }
 
     @Test
     public void testPutConnectorConfigWithSpecialCharsInName() throws Throwable {
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
 
-        herder.putConnectorConfig(EasyMock.eq(CONNECTOR_NAME_SPECIAL_CHARS), EasyMock.eq(CONNECTOR_CONFIG_SPECIAL_CHARS), EasyMock.eq(true), EasyMock.capture(cb));
         expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(CONNECTOR_NAME_SPECIAL_CHARS, CONNECTOR_CONFIG_SPECIAL_CHARS, CONNECTOR_TASK_NAMES,
-                ConnectorType.SINK)));
+            ConnectorType.SINK))
+        ).when(herder).putConnectorConfig(eq(CONNECTOR_NAME_SPECIAL_CHARS), eq(CONNECTOR_CONFIG_SPECIAL_CHARS), eq(true), cb.capture());
 
-        PowerMock.replayAll();
-
-        String rspLocation = connectorsResource.putConnectorConfig(CONNECTOR_NAME_SPECIAL_CHARS, FORWARD, CONNECTOR_CONFIG_SPECIAL_CHARS).getLocation().toString();
+        String rspLocation = connectorsResource.putConnectorConfig(CONNECTOR_NAME_SPECIAL_CHARS, NULL_HEADERS, FORWARD, CONNECTOR_CONFIG_SPECIAL_CHARS).getLocation().toString();
         String decoded = new URI(rspLocation).getPath();
-        Assert.assertEquals("/connectors/" + CONNECTOR_NAME_SPECIAL_CHARS, decoded);
-
-        PowerMock.verifyAll();
+        assertEquals("/connectors/" + CONNECTOR_NAME_SPECIAL_CHARS, decoded);
     }
 
     @Test
     public void testPutConnectorConfigWithControlSequenceInName() throws Throwable {
-        final Capture<Callback<Herder.Created<ConnectorInfo>>> cb = Capture.newInstance();
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
 
-        herder.putConnectorConfig(EasyMock.eq(CONNECTOR_NAME_CONTROL_SEQUENCES1), EasyMock.eq(CONNECTOR_CONFIG_CONTROL_SEQUENCES), EasyMock.eq(true), EasyMock.capture(cb));
         expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(CONNECTOR_NAME_CONTROL_SEQUENCES1, CONNECTOR_CONFIG_CONTROL_SEQUENCES, CONNECTOR_TASK_NAMES,
-                ConnectorType.SINK)));
+            ConnectorType.SINK))
+        ).when(herder).putConnectorConfig(eq(CONNECTOR_NAME_CONTROL_SEQUENCES1), eq(CONNECTOR_CONFIG_CONTROL_SEQUENCES), eq(true), cb.capture());
 
-        PowerMock.replayAll();
-
-        String rspLocation = connectorsResource.putConnectorConfig(CONNECTOR_NAME_CONTROL_SEQUENCES1, FORWARD, CONNECTOR_CONFIG_CONTROL_SEQUENCES).getLocation().toString();
+        String rspLocation = connectorsResource.putConnectorConfig(CONNECTOR_NAME_CONTROL_SEQUENCES1, NULL_HEADERS, FORWARD, CONNECTOR_CONFIG_CONTROL_SEQUENCES).getLocation().toString();
         String decoded = new URI(rspLocation).getPath();
-        Assert.assertEquals("/connectors/" + CONNECTOR_NAME_CONTROL_SEQUENCES1, decoded);
-
-        PowerMock.verifyAll();
+        assertEquals("/connectors/" + CONNECTOR_NAME_CONTROL_SEQUENCES1, decoded);
     }
 
-    @Test(expected = BadRequestException.class)
-    public void testPutConnectorConfigNameMismatch() throws Throwable {
+    @Test
+    public void testPutConnectorConfigNameMismatch() {
         Map<String, String> connConfig = new HashMap<>(CONNECTOR_CONFIG);
         connConfig.put(ConnectorConfig.NAME_CONFIG, "mismatched-name");
-        connectorsResource.putConnectorConfig(CONNECTOR_NAME, FORWARD, connConfig);
+        assertThrows(BadRequestException.class, () -> connectorsResource.putConnectorConfig(CONNECTOR_NAME,
+            NULL_HEADERS, FORWARD, connConfig));
     }
 
-    @Test(expected = BadRequestException.class)
-    public void testCreateConnectorConfigNameMismatch() throws Throwable {
+    @Test
+    public void testCreateConnectorConfigNameMismatch() {
         Map<String, String> connConfig = new HashMap<>();
         connConfig.put(ConnectorConfig.NAME_CONFIG, "mismatched-name");
-        CreateConnectorRequest request = new CreateConnectorRequest(CONNECTOR_NAME, connConfig);
-        connectorsResource.createConnector(FORWARD, request);
+        CreateConnectorRequest request = new CreateConnectorRequest(CONNECTOR_NAME, connConfig, null, null);
+        assertThrows(BadRequestException.class, () -> connectorsResource.createConnector(FORWARD, NULL_HEADERS, request));
+    }
+
+    @Test
+    public void testPatchConnectorConfig() throws Throwable {
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, new Herder.Created<>(true, new ConnectorInfo(CONNECTOR_NAME, CONNECTOR_CONFIG_PATCHED, CONNECTOR_TASK_NAMES,
+                ConnectorType.SINK))
+        ).when(herder).patchConnectorConfig(eq(CONNECTOR_NAME), eq(CONNECTOR_CONFIG_PATCH), cb.capture());
+
+        connectorsResource.patchConnectorConfig(CONNECTOR_NAME, NULL_HEADERS, FORWARD, CONNECTOR_CONFIG_PATCH);
+    }
+
+    @Test
+    public void testPatchConnectorConfigLeaderRedirect() throws Throwable {
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackNotLeaderException(cb)
+                .when(herder).patchConnectorConfig(eq(CONNECTOR_NAME), eq(CONNECTOR_CONFIG_PATCH), cb.capture());
+        when(restClient.httpRequest(eq(LEADER_URL + "connectors/" + CONNECTOR_NAME + "/config?forward=false"), eq("PATCH"), isNull(), eq(CONNECTOR_CONFIG_PATCH), any()))
+                .thenReturn(new RestClient.HttpResponse<>(200, new HashMap<>(CONNECTOR_CONFIG_PATCHED), null));
+
+        connectorsResource.patchConnectorConfig(CONNECTOR_NAME, NULL_HEADERS, FORWARD, CONNECTOR_CONFIG_PATCH);
+    }
+
+    @Test
+    public void testPatchConnectorConfigNotFound() {
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotFoundException("Connector " + CONNECTOR_NAME + " not found"))
+                .when(herder).patchConnectorConfig(eq(CONNECTOR_NAME), eq(CONNECTOR_CONFIG_PATCH), cb.capture());
+
+        assertThrows(NotFoundException.class, () -> connectorsResource.patchConnectorConfig(
+                CONNECTOR_NAME, NULL_HEADERS, FORWARD, CONNECTOR_CONFIG_PATCH));
     }
 
     @Test
     public void testGetConnectorTaskConfigs() throws Throwable {
-        final Capture<Callback<List<TaskInfo>>> cb = Capture.newInstance();
-        herder.taskConfigs(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
-        expectAndCallbackResult(cb, TASK_INFOS);
+        final ArgumentCaptor<Callback<List<TaskInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, TASK_INFOS).when(herder).taskConfigs(eq(CONNECTOR_NAME), cb.capture());
 
-        PowerMock.replayAll();
-
-        List<TaskInfo> taskInfos = connectorsResource.getTaskConfigs(CONNECTOR_NAME, FORWARD);
+        List<TaskInfo> taskInfos = connectorsResource.getTaskConfigs(CONNECTOR_NAME);
         assertEquals(TASK_INFOS, taskInfos);
-
-        PowerMock.verifyAll();
-    }
-
-    @Test(expected = NotFoundException.class)
-    public void testGetConnectorTaskConfigsConnectorNotFound() throws Throwable {
-        final Capture<Callback<List<TaskInfo>>> cb = Capture.newInstance();
-        herder.taskConfigs(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
-        expectAndCallbackException(cb, new NotFoundException("connector not found"));
-
-        PowerMock.replayAll();
-
-        connectorsResource.getTaskConfigs(CONNECTOR_NAME, FORWARD);
-
-        PowerMock.verifyAll();
     }
 
     @Test
-    public void testPutConnectorTaskConfigs() throws Throwable {
-        final Capture<Callback<Void>> cb = Capture.newInstance();
-        herder.putTaskConfigs(EasyMock.eq(CONNECTOR_NAME), EasyMock.eq(TASK_CONFIGS), EasyMock.capture(cb));
-        expectAndCallbackResult(cb, null);
+    public void testGetConnectorTaskConfigsConnectorNotFound() {
+        final ArgumentCaptor<Callback<List<TaskInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotFoundException("connector not found"))
+            .when(herder).taskConfigs(eq(CONNECTOR_NAME), cb.capture());
 
-        PowerMock.replayAll();
-
-        connectorsResource.putTaskConfigs(CONNECTOR_NAME, FORWARD, TASK_CONFIGS);
-
-        PowerMock.verifyAll();
+        assertThrows(NotFoundException.class, () -> connectorsResource.getTaskConfigs(CONNECTOR_NAME));
     }
 
-    @Test(expected = NotFoundException.class)
-    public void testPutConnectorTaskConfigsConnectorNotFound() throws Throwable {
-        final Capture<Callback<Void>> cb = Capture.newInstance();
-        herder.putTaskConfigs(EasyMock.eq(CONNECTOR_NAME), EasyMock.eq(TASK_CONFIGS), EasyMock.capture(cb));
-        expectAndCallbackException(cb, new NotFoundException("not found"));
+    @Test
+    public void testRestartConnectorAndTasksConnectorNotFound() {
+        RestartRequest restartRequest = new RestartRequest(CONNECTOR_NAME, true, false);
+        final ArgumentCaptor<Callback<ConnectorStateInfo>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotFoundException("not found"))
+            .when(herder).restartConnectorAndTasks(eq(restartRequest), cb.capture());
 
-        PowerMock.replayAll();
-
-        connectorsResource.putTaskConfigs(CONNECTOR_NAME, FORWARD, TASK_CONFIGS);
-
-        PowerMock.verifyAll();
+        assertThrows(NotFoundException.class, () ->
+                connectorsResource.restartConnector(CONNECTOR_NAME, NULL_HEADERS, restartRequest.includeTasks(), restartRequest.onlyFailed(), FORWARD)
+        );
     }
 
-    @Test(expected = NotFoundException.class)
-    public void testRestartConnectorNotFound() throws Throwable {
-        final Capture<Callback<Void>> cb = Capture.newInstance();
-        herder.restartConnector(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
-        expectAndCallbackException(cb, new NotFoundException("not found"));
+    @Test
+    public void testRestartConnectorAndTasksLeaderRedirect() throws Throwable {
+        RestartRequest restartRequest = new RestartRequest(CONNECTOR_NAME, true, false);
+        final ArgumentCaptor<Callback<ConnectorStateInfo>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackNotLeaderException(cb).when(herder)
+            .restartConnectorAndTasks(eq(restartRequest), cb.capture());
 
-        PowerMock.replayAll();
+        when(restClient.httpRequest(eq(LEADER_URL + "connectors/" + CONNECTOR_NAME + "/restart?forward=true&includeTasks=" + restartRequest.includeTasks() + "&onlyFailed=" + restartRequest.onlyFailed()), eq("POST"), isNull(), isNull(), any()))
+                .thenReturn(new RestClient.HttpResponse<>(202, new HashMap<>(), null));
+        Response response = connectorsResource.restartConnector(CONNECTOR_NAME, NULL_HEADERS, restartRequest.includeTasks(), restartRequest.onlyFailed(), null);
+        assertEquals(Response.Status.ACCEPTED.getStatusCode(), response.getStatus());
+    }
 
-        connectorsResource.restartConnector(CONNECTOR_NAME, FORWARD);
+    @Test
+    public void testRestartConnectorAndTasksRebalanceNeeded() {
+        RestartRequest restartRequest = new RestartRequest(CONNECTOR_NAME, true, false);
+        final ArgumentCaptor<Callback<ConnectorStateInfo>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new RebalanceNeededException("Request cannot be completed because a rebalance is expected"))
+            .when(herder).restartConnectorAndTasks(eq(restartRequest), cb.capture());
 
-        PowerMock.verifyAll();
+        ConnectRestException ex = assertThrows(ConnectRestException.class, () ->
+                connectorsResource.restartConnector(CONNECTOR_NAME, NULL_HEADERS, restartRequest.includeTasks(), restartRequest.onlyFailed(), FORWARD)
+        );
+        assertEquals(Response.Status.CONFLICT.getStatusCode(), ex.statusCode());
+    }
+
+    @Test
+    public void testRestartConnectorAndTasksRequestAccepted() throws Throwable {
+        ConnectorStateInfo.ConnectorState state = new ConnectorStateInfo.ConnectorState(
+                AbstractStatus.State.RESTARTING.name(), "foo", null, null
+        );
+        ConnectorStateInfo connectorStateInfo = new ConnectorStateInfo(CONNECTOR_NAME, state, List.of(), ConnectorType.SOURCE);
+
+        RestartRequest restartRequest = new RestartRequest(CONNECTOR_NAME, true, false);
+        final ArgumentCaptor<Callback<ConnectorStateInfo>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackResult(cb, connectorStateInfo)
+            .when(herder).restartConnectorAndTasks(eq(restartRequest), cb.capture());
+
+        Response response = connectorsResource.restartConnector(CONNECTOR_NAME, NULL_HEADERS, restartRequest.includeTasks(), restartRequest.onlyFailed(), FORWARD);
+        assertEquals(CONNECTOR_NAME, ((ConnectorStateInfo) response.getEntity()).name());
+        assertEquals(state.state(), ((ConnectorStateInfo) response.getEntity()).connector().state());
+        assertEquals(Response.Status.ACCEPTED.getStatusCode(), response.getStatus());
+    }
+
+    @Test
+    public void testRestartConnectorNotFound() {
+        final ArgumentCaptor<Callback<Void>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotFoundException("not found"))
+            .when(herder).restartConnector(eq(CONNECTOR_NAME), cb.capture());
+
+        assertThrows(NotFoundException.class, () ->
+                connectorsResource.restartConnector(CONNECTOR_NAME, NULL_HEADERS, false, false, FORWARD)
+        );
     }
 
     @Test
     public void testRestartConnectorLeaderRedirect() throws Throwable {
-        final Capture<Callback<Void>> cb = Capture.newInstance();
-        herder.restartConnector(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
-        expectAndCallbackNotLeaderException(cb);
+        final ArgumentCaptor<Callback<Void>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackNotLeaderException(cb).when(herder)
+            .restartConnector(eq(CONNECTOR_NAME), cb.capture());
 
-        EasyMock.expect(RestClient.httpRequest(EasyMock.eq("http://leader:8083/connectors/" + CONNECTOR_NAME + "/restart?forward=true"),
-                EasyMock.eq("POST"), EasyMock.isNull(), EasyMock.<TypeReference>anyObject(), EasyMock.anyObject(WorkerConfig.class)))
-                .andReturn(new RestClient.HttpResponse<>(202, new HashMap<String, String>(), null));
-
-        PowerMock.replayAll();
-
-        connectorsResource.restartConnector(CONNECTOR_NAME, null);
-
-        PowerMock.verifyAll();
+        when(restClient.httpRequest(eq(LEADER_URL + "connectors/" + CONNECTOR_NAME + "/restart?forward=true"), eq("POST"), isNull(), isNull(), any()))
+                .thenReturn(new RestClient.HttpResponse<>(202, new HashMap<>(), null));
+        Response response = connectorsResource.restartConnector(CONNECTOR_NAME, NULL_HEADERS, false, false, null);
+        assertEquals(Response.Status.NO_CONTENT.getStatusCode(), response.getStatus());
     }
 
     @Test
     public void testRestartConnectorOwnerRedirect() throws Throwable {
-        final Capture<Callback<Void>> cb = Capture.newInstance();
-        herder.restartConnector(EasyMock.eq(CONNECTOR_NAME), EasyMock.capture(cb));
+        final ArgumentCaptor<Callback<Void>> cb = ArgumentCaptor.forClass(Callback.class);
         String ownerUrl = "http://owner:8083";
-        expectAndCallbackException(cb, new NotAssignedException("not owner test", ownerUrl));
-
-        EasyMock.expect(RestClient.httpRequest(EasyMock.eq("http://owner:8083/connectors/" + CONNECTOR_NAME + "/restart?forward=false"),
-                EasyMock.eq("POST"), EasyMock.isNull(), EasyMock.<TypeReference>anyObject(), EasyMock.anyObject(WorkerConfig.class)))
-                .andReturn(new RestClient.HttpResponse<>(202, new HashMap<String, String>(), null));
-
-        PowerMock.replayAll();
-
-        connectorsResource.restartConnector(CONNECTOR_NAME, true);
-
-        PowerMock.verifyAll();
+        expectAndCallbackException(cb, new NotAssignedException("not owner test", ownerUrl))
+            .when(herder).restartConnector(eq(CONNECTOR_NAME), cb.capture());
+        when(restClient.httpRequest(eq("http://owner:8083/connectors/" + CONNECTOR_NAME + "/restart?forward=false"), eq("POST"), isNull(), isNull(), any()))
+                .thenReturn(new RestClient.HttpResponse<>(202, new HashMap<>(), null));
+        Response response = connectorsResource.restartConnector(CONNECTOR_NAME, NULL_HEADERS, false, false, true);
+        assertEquals(Response.Status.NO_CONTENT.getStatusCode(), response.getStatus());
     }
 
-    @Test(expected = NotFoundException.class)
-    public void testRestartTaskNotFound() throws Throwable {
+    @Test
+    public void testRestartTaskNotFound() {
         ConnectorTaskId taskId = new ConnectorTaskId(CONNECTOR_NAME, 0);
-        final Capture<Callback<Void>> cb = Capture.newInstance();
-        herder.restartTask(EasyMock.eq(taskId), EasyMock.capture(cb));
-        expectAndCallbackException(cb, new NotFoundException("not found"));
+        final ArgumentCaptor<Callback<Void>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotFoundException("not found"))
+            .when(herder).restartTask(eq(taskId), cb.capture());
 
-        PowerMock.replayAll();
-
-        connectorsResource.restartTask(CONNECTOR_NAME, 0, FORWARD);
-
-        PowerMock.verifyAll();
+        assertThrows(NotFoundException.class, () -> connectorsResource.restartTask(CONNECTOR_NAME, 0, NULL_HEADERS, FORWARD));
     }
 
     @Test
     public void testRestartTaskLeaderRedirect() throws Throwable {
         ConnectorTaskId taskId = new ConnectorTaskId(CONNECTOR_NAME, 0);
 
-        final Capture<Callback<Void>> cb = Capture.newInstance();
-        herder.restartTask(EasyMock.eq(taskId), EasyMock.capture(cb));
-        expectAndCallbackNotLeaderException(cb);
+        final ArgumentCaptor<Callback<Void>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackNotLeaderException(cb).when(herder)
+            .restartTask(eq(taskId), cb.capture());
 
-        EasyMock.expect(RestClient.httpRequest(EasyMock.eq("http://leader:8083/connectors/" + CONNECTOR_NAME + "/tasks/0/restart?forward=true"),
-                EasyMock.eq("POST"), EasyMock.isNull(), EasyMock.<TypeReference>anyObject(), EasyMock.anyObject(WorkerConfig.class)))
-                .andReturn(new RestClient.HttpResponse<>(202, new HashMap<String, String>(), null));
-
-        PowerMock.replayAll();
-
-        connectorsResource.restartTask(CONNECTOR_NAME, 0, null);
-
-        PowerMock.verifyAll();
+        when(restClient.httpRequest(eq(LEADER_URL + "connectors/" + CONNECTOR_NAME + "/tasks/0/restart?forward=true"), eq("POST"), isNull(), isNull(), any()))
+                .thenReturn(new RestClient.HttpResponse<>(202, new HashMap<>(), null));
+        connectorsResource.restartTask(CONNECTOR_NAME, 0, NULL_HEADERS, null);
     }
 
     @Test
     public void testRestartTaskOwnerRedirect() throws Throwable {
         ConnectorTaskId taskId = new ConnectorTaskId(CONNECTOR_NAME, 0);
 
-        final Capture<Callback<Void>> cb = Capture.newInstance();
-        herder.restartTask(EasyMock.eq(taskId), EasyMock.capture(cb));
+        final ArgumentCaptor<Callback<Void>> cb = ArgumentCaptor.forClass(Callback.class);
         String ownerUrl = "http://owner:8083";
-        expectAndCallbackException(cb, new NotAssignedException("not owner test", ownerUrl));
+        expectAndCallbackException(cb, new NotAssignedException("not owner test", ownerUrl))
+            .when(herder).restartTask(eq(taskId), cb.capture());
 
-        EasyMock.expect(RestClient.httpRequest(EasyMock.eq("http://owner:8083/connectors/" + CONNECTOR_NAME + "/tasks/0/restart?forward=false"),
-                EasyMock.eq("POST"), EasyMock.isNull(), EasyMock.<TypeReference>anyObject(), EasyMock.anyObject(WorkerConfig.class)))
-                .andReturn(new RestClient.HttpResponse<>(202, new HashMap<String, String>(), null));
-
-        PowerMock.replayAll();
-
-        connectorsResource.restartTask(CONNECTOR_NAME, 0, true);
-
-        PowerMock.verifyAll();
+        when(restClient.httpRequest(eq("http://owner:8083/connectors/" + CONNECTOR_NAME + "/tasks/0/restart?forward=false"), eq("POST"), isNull(), isNull(), any()))
+                .thenReturn(new RestClient.HttpResponse<>(202, new HashMap<>(), null));
+        connectorsResource.restartTask(CONNECTOR_NAME, 0, NULL_HEADERS, true);
     }
 
-    private  <T> void expectAndCallbackResult(final Capture<Callback<T>> cb, final T value) {
-        PowerMock.expectLastCall().andAnswer(new IAnswer<Void>() {
-            @Override
-            public Void answer() throws Throwable {
-                cb.getValue().onCompletion(null, value);
-                return null;
-            }
+    @Test
+    public void testConnectorActiveTopicsWithTopicTrackingDisabled() {
+        when(serverConfig.topicTrackingEnabled()).thenReturn(false);
+        when(serverConfig.topicTrackingResetEnabled()).thenReturn(false);
+        connectorsResource = new ConnectorsResource(herder, serverConfig, restClient, REQUEST_TIMEOUT);
+
+        Exception e = assertThrows(ConnectRestException.class,
+            () -> connectorsResource.getConnectorActiveTopics(CONNECTOR_NAME));
+        assertEquals("Topic tracking is disabled.", e.getMessage());
+    }
+
+    @Test
+    public void testResetConnectorActiveTopicsWithTopicTrackingDisabled() {
+        when(serverConfig.topicTrackingEnabled()).thenReturn(false);
+        when(serverConfig.topicTrackingResetEnabled()).thenReturn(true);
+        HttpHeaders headers = mock(HttpHeaders.class);
+        connectorsResource = new ConnectorsResource(herder, serverConfig, restClient, REQUEST_TIMEOUT);
+
+        Exception e = assertThrows(ConnectRestException.class,
+            () -> connectorsResource.resetConnectorActiveTopics(CONNECTOR_NAME, headers));
+        assertEquals("Topic tracking is disabled.", e.getMessage());
+    }
+
+    @Test
+    public void testResetConnectorActiveTopicsWithTopicTrackingEnabled() {
+        when(serverConfig.topicTrackingEnabled()).thenReturn(true);
+        when(serverConfig.topicTrackingResetEnabled()).thenReturn(false);
+        HttpHeaders headers = mock(HttpHeaders.class);
+        connectorsResource = new ConnectorsResource(herder, serverConfig, restClient, REQUEST_TIMEOUT);
+
+        Exception e = assertThrows(ConnectRestException.class,
+            () -> connectorsResource.resetConnectorActiveTopics(CONNECTOR_NAME, headers));
+        assertEquals("Topic tracking reset is disabled.", e.getMessage());
+    }
+
+    @Test
+    public void testConnectorActiveTopics() {
+        when(serverConfig.topicTrackingEnabled()).thenReturn(true);
+        when(serverConfig.topicTrackingResetEnabled()).thenReturn(true);
+        when(herder.connectorActiveTopics(CONNECTOR_NAME))
+            .thenReturn(new ActiveTopicsInfo(CONNECTOR_NAME, CONNECTOR_ACTIVE_TOPICS));
+        connectorsResource = new ConnectorsResource(herder, serverConfig, restClient, REQUEST_TIMEOUT);
+
+        Map<String, ActiveTopicsInfo> body = connectorsResource.getConnectorActiveTopics(CONNECTOR_NAME);
+        assertEquals(CONNECTOR_NAME, body.get(CONNECTOR_NAME).connector());
+        assertEquals(new HashSet<>(CONNECTOR_ACTIVE_TOPICS),
+                body.get(CONNECTOR_NAME).topics());
+    }
+
+    @Test
+    public void testResetConnectorActiveTopics() {
+        HttpHeaders headers = mock(HttpHeaders.class);
+        connectorsResource = new ConnectorsResource(herder, serverConfig, restClient, REQUEST_TIMEOUT);
+
+        Response response = connectorsResource.resetConnectorActiveTopics(CONNECTOR_NAME, headers);
+        verify(herder).resetConnectorActiveTopics(CONNECTOR_NAME);
+        assertEquals(Response.Status.ACCEPTED.getStatusCode(), response.getStatus());
+    }
+
+    @Test
+    public void testCompleteOrForwardWithErrorAndNoForwardUrl() {
+        final ArgumentCaptor<Callback<Herder.Created<ConnectorInfo>>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotLeaderException("not leader", null))
+            .when(herder).deleteConnectorConfig(eq(CONNECTOR_NAME), cb.capture());
+
+        ConnectRestException e = assertThrows(ConnectRestException.class, () ->
+            connectorsResource.destroyConnector(CONNECTOR_NAME, NULL_HEADERS, FORWARD));
+        assertTrue(e.getMessage().contains("no known leader URL"));
+    }
+
+    @Test
+    public void testGetOffsetsConnectorNotFound() {
+        final ArgumentCaptor<Callback<ConnectorOffsets>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotFoundException("Connector not found"))
+                .when(herder).connectorOffsets(anyString(), cb.capture());
+
+        assertThrows(NotFoundException.class, () -> connectorsResource.getOffsets("unknown-connector"));
+    }
+
+    @Test
+    public void testGetOffsets() throws Throwable {
+        final ArgumentCaptor<Callback<ConnectorOffsets>> cb = ArgumentCaptor.forClass(Callback.class);
+        ConnectorOffsets offsets = new ConnectorOffsets(List.of(
+                new ConnectorOffset(Map.of("partitionKey", "partitionValue"), Map.of("offsetKey", "offsetValue")),
+                new ConnectorOffset(Map.of("partitionKey", "partitionValue2"), Map.of("offsetKey", "offsetValue"))
+        ));
+        expectAndCallbackResult(cb, offsets).when(herder).connectorOffsets(eq(CONNECTOR_NAME), cb.capture());
+
+        assertEquals(offsets, connectorsResource.getOffsets(CONNECTOR_NAME));
+    }
+
+    @Test
+    public void testAlterOffsetsEmptyOffsets() {
+        assertThrows(BadRequestException.class, () -> connectorsResource.alterConnectorOffsets(
+                false, NULL_HEADERS, CONNECTOR_NAME, new ConnectorOffsets(List.of())));
+    }
+
+    @Test
+    public void testAlterOffsetsNotLeader() throws Throwable {
+        Map<String, ?> partition = new HashMap<>();
+        Map<String, ?> offset = new HashMap<>();
+        ConnectorOffset connectorOffset = new ConnectorOffset(partition, offset);
+        ConnectorOffsets body = new ConnectorOffsets(List.of(connectorOffset));
+
+        final ArgumentCaptor<Callback<Message>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackNotLeaderException(cb).when(herder).alterConnectorOffsets(eq(CONNECTOR_NAME), eq(body.toMap()), cb.capture());
+
+        when(restClient.httpRequest(eq(LEADER_URL + "connectors/" + CONNECTOR_NAME + "/offsets?forward=true"), eq("PATCH"), isNull(), eq(body), any()))
+                .thenReturn(new RestClient.HttpResponse<>(200, new HashMap<>(), new Message("")));
+        connectorsResource.alterConnectorOffsets(null, NULL_HEADERS, CONNECTOR_NAME, body);
+    }
+
+    @Test
+    public void testAlterOffsetsConnectorNotFound() {
+        Map<String, ?> partition = new HashMap<>();
+        Map<String, ?> offset = new HashMap<>();
+        ConnectorOffset connectorOffset = new ConnectorOffset(partition, offset);
+        ConnectorOffsets body = new ConnectorOffsets(List.of(connectorOffset));
+        final ArgumentCaptor<Callback<Message>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotFoundException("Connector not found"))
+                .when(herder).alterConnectorOffsets(eq(CONNECTOR_NAME), eq(body.toMap()), cb.capture());
+
+        assertThrows(NotFoundException.class, () -> connectorsResource.alterConnectorOffsets(null, NULL_HEADERS, CONNECTOR_NAME, body));
+    }
+
+    @Test
+    public void testAlterOffsets() throws Throwable {
+        Map<String, ?> partition = Map.of("partitionKey", "partitionValue");
+        Map<String, ?> offset = Map.of("offsetKey", "offsetValue");
+        ConnectorOffset connectorOffset = new ConnectorOffset(partition, offset);
+        ConnectorOffsets body = new ConnectorOffsets(List.of(connectorOffset));
+
+        final ArgumentCaptor<Callback<Message>> cb = ArgumentCaptor.forClass(Callback.class);
+        Message msg = new Message("The offsets for this connector have been altered successfully");
+        doAnswer(invocation -> {
+            cb.getValue().onCompletion(null, msg);
+            return null;
+        }).when(herder).alterConnectorOffsets(eq(CONNECTOR_NAME), eq(body.toMap()), cb.capture());
+        Message result = connectorsResource.alterConnectorOffsets(null, NULL_HEADERS, CONNECTOR_NAME, body);
+        assertEquals(msg, result);
+    }
+
+    @Test
+    public void testResetOffsetsNotLeader() throws Throwable {
+        final ArgumentCaptor<Callback<Message>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackNotLeaderException(cb).when(herder).resetConnectorOffsets(eq(CONNECTOR_NAME), cb.capture());
+
+        when(restClient.httpRequest(eq(LEADER_URL + "connectors/" + CONNECTOR_NAME + "/offsets?forward=true"), eq("DELETE"), isNull(), isNull(), any()))
+                .thenReturn(new RestClient.HttpResponse<>(200, new HashMap<>(), new Message("")));
+        connectorsResource.resetConnectorOffsets(null, NULL_HEADERS, CONNECTOR_NAME);
+    }
+
+    @Test
+    public void testResetOffsetsConnectorNotFound() {
+        final ArgumentCaptor<Callback<Message>> cb = ArgumentCaptor.forClass(Callback.class);
+        expectAndCallbackException(cb, new NotFoundException("Connector not found"))
+                .when(herder).resetConnectorOffsets(eq(CONNECTOR_NAME), cb.capture());
+
+        assertThrows(NotFoundException.class, () -> connectorsResource.resetConnectorOffsets(null, NULL_HEADERS, CONNECTOR_NAME));
+    }
+
+    @Test
+    public void testResetOffsets() throws Throwable {
+        final ArgumentCaptor<Callback<Message>> cb = ArgumentCaptor.forClass(Callback.class);
+        Message msg = new Message("The offsets for this connector have been reset successfully");
+        doAnswer(invocation -> {
+            cb.getValue().onCompletion(null, msg);
+            return null;
+        }).when(herder).resetConnectorOffsets(eq(CONNECTOR_NAME), cb.capture());
+        Message result = connectorsResource.resetConnectorOffsets(null, NULL_HEADERS, CONNECTOR_NAME);
+        assertEquals(msg, result);
+    }
+
+    private <T> Stubber expectAndCallbackResult(final ArgumentCaptor<Callback<T>> cb, final T value) {
+        return doAnswer(invocation -> {
+            cb.getValue().onCompletion(null, value);
+            return null;
         });
     }
 
-    private  <T> void expectAndCallbackException(final Capture<Callback<T>> cb, final Throwable t) {
-        PowerMock.expectLastCall().andAnswer(new IAnswer<Void>() {
-            @Override
-            public Void answer() throws Throwable {
-                cb.getValue().onCompletion(t, null);
-                return null;
-            }
+    private <T> Stubber expectAndCallbackException(final ArgumentCaptor<Callback<T>> cb, final Throwable t) {
+        return doAnswer(invocation -> {
+            cb.getValue().onCompletion(t, null);
+            return null;
         });
     }
 
-    private  <T> void expectAndCallbackNotLeaderException(final Capture<Callback<T>> cb) {
-        expectAndCallbackException(cb, new NotLeaderException("not leader test", LEADER_URL));
+    private <T> Stubber expectAndCallbackNotLeaderException(final ArgumentCaptor<Callback<T>> cb) {
+        return expectAndCallbackException(cb, new NotLeaderException("not leader test", LEADER_URL));
     }
+
 }

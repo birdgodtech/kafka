@@ -17,14 +17,14 @@
 
 package org.apache.kafka.common.security.plain.internals;
 
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.security.JaasContext;
 import org.apache.kafka.common.security.auth.AuthenticateCallbackHandler;
-import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.security.plain.PlainAuthenticateCallback;
 import org.apache.kafka.common.security.plain.PlainLoginModule;
+import org.apache.kafka.common.utils.Utils;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -36,6 +36,7 @@ import javax.security.auth.login.AppConfigurationEntry;
 public class PlainServerCallbackHandler implements AuthenticateCallbackHandler {
 
     private static final String JAAS_USER_PREFIX = "user_";
+    private static final char[] UNKNOWN_USER_DUMMY_PASSWORD = {'\0'};
     private List<AppConfigurationEntry> jaasConfigEntries;
 
     @Override
@@ -65,7 +66,9 @@ public class PlainServerCallbackHandler implements AuthenticateCallbackHandler {
             String expectedPassword = JaasContext.configEntryOption(jaasConfigEntries,
                     JAAS_USER_PREFIX + username,
                     PlainLoginModule.class.getName());
-            return expectedPassword != null && Arrays.equals(password, expectedPassword.toCharArray());
+            char[] comparedPassword = expectedPassword != null ? expectedPassword.toCharArray() : UNKNOWN_USER_DUMMY_PASSWORD;
+            boolean matches = Utils.isEqualConstantTime(password, comparedPassword);
+            return matches && expectedPassword != null;
         }
     }
 
